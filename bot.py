@@ -75,8 +75,20 @@ def sheets_get_pending() -> list[dict]:
 def sheets_add_task(text: str) -> dict:
     ws = _sheets_client()
     task_id = str(int(datetime.now().timestamp() * 1000))
-    ws.append_row([task_id, text.strip(), "pendiente", ""])
+    ws.append_row([task_id, text.strip(), "pendiente", "", ""])
     return {"id": task_id, "tarea": text.strip(), "estado": "pendiente"}
+
+def sheets_update_fecha(task_id: str, fecha: str) -> bool:
+    ws = _sheets_client()
+    all_rows = ws.get_all_records()
+    all_ids = [str(r.get("id", "")) for r in all_rows]
+    if task_id not in all_ids:
+        return False
+    sheet_row = all_ids.index(task_id) + 2
+    headers = ws.row_values(1)
+    fecha_col = headers.index("fecha") + 1
+    ws.update_cell(sheet_row, fecha_col, fecha)
+    return True
 
 def sheets_update_priority(task_id: str, stars: int) -> bool:
     ws = _sheets_client()
@@ -341,7 +353,14 @@ def build_tasks_footer() -> str:
         for i, t in enumerate(tasks_sorted, 1):
             stars = int(t.get("prioridad") or 0)
             star_str = ("⭐" * stars + " ") if stars > 0 else ""
-            lines.append(f"{i}\\. {star_str}{escape_md(t['tarea'])}")
+            fecha = str(t.get("fecha", "")).strip()
+            fecha_str = ""
+            if fecha:
+                try:
+                    fecha_str = " — " + datetime.strptime(fecha, "%Y-%m-%d").strftime("%d/%m")
+                except Exception:
+                    fecha_str = f" — {fecha}"
+            lines.append(f"{i}\\. {star_str}{escape_md(t['tarea'])}{escape_md(fecha_str)}")
     lines.append("")
     lines.append("_Usá \\.texto para agregar tarea\\. Usá \\.número para eliminar\\._")
     return "\n".join(lines)
@@ -420,13 +439,44 @@ async def handle_priority_callback(update: Update, context: ContextTypes.DEFAULT
         stars = int(stars_str)
         sheets_update_priority(task_id, stars)
         star_display = "⭐" * stars if stars > 0 else "sin prioridad"
+        keyboard = [[
+            InlineKeyboardButton("Hoy",      callback_data=f"fecha_{task_id}_hoy"),
+            InlineKeyboardButton("Mañana",   callback_data=f"fecha_{task_id}_manana"),
+            InlineKeyboardButton("En 7 días", callback_data=f"fecha_{task_id}_semana"),
+            InlineKeyboardButton("Sin fecha", callback_data=f"fecha_{task_id}_ninguna"),
+        ]]
         await query.edit_message_text(
-            f"✅ Guardado: {escape_md(star_display)}\n\n" + build_tasks_footer(),
+            f"✅ Prioridad: {escape_md(star_display)}\\. ¿Fecha límite?",
             parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
     except Exception as e:
         logger.error(f"Error en priority callback: {e}")
         await query.edit_message_text(f"❌ Error al guardar prioridad: {e}")
+
+# ── Fecha callback ────────────────────────────────────────────────────────────
+async def handle_fecha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    logger.info(f"Fecha callback: {query.data}")
+    await query.answer()
+    try:
+        parts = query.data.split("_", 2)
+        task_id, tipo = parts[1], parts[2]
+        if tipo != "ninguna":
+            d = datetime.now(TZ_ARG)
+            if tipo == "manana":
+                d += timedelta(days=1)
+            elif tipo == "semana":
+                d += timedelta(days=7)
+            fecha = d.strftime("%Y-%m-%d")
+            sheets_update_fecha(task_id, fecha)
+            msg = f"✅ Fecha límite: {escape_md(d.strftime('%d/%m'))}\n\n"
+        else:
+            msg = "✅ Sin fecha límite\n\n"
+        await query.edit_message_text(msg + build_tasks_footer(), parse_mode="MarkdownV2")
+    except Exception as e:
+        logger.error(f"Error en fecha callback: {e}")
+        await query.edit_message_text(f"❌ Error: {e}")
 
 # ── Daily summary ─────────────────────────────────────────────────────────────
 async def send_daily_summary(bot):
@@ -459,6 +509,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(CallbackQueryHandler(handle_priority_callback, pattern=r"^prio_"))
+    app.add_handler(CallbackQueryHandler(handle_fecha_callback, pattern=r"^fecha_"))
 
     scheduler = AsyncIOScheduler(timezone=TZ_ARG)
     scheduler.add_job(
