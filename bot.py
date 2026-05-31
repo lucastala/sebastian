@@ -3,6 +3,7 @@ import json
 import re
 import logging
 import tempfile
+import calendar as cal_module
 from datetime import datetime, timedelta, date
 
 from dotenv import load_dotenv
@@ -77,6 +78,38 @@ def sheets_add_task(text: str) -> dict:
     task_id = str(int(datetime.now().timestamp() * 1000))
     ws.append_row([task_id, text.strip(), "pendiente", "", ""])
     return {"id": task_id, "tarea": text.strip(), "estado": "pendiente"}
+
+def build_calendar_keyboard(task_id: str, year: int, month: int) -> InlineKeyboardMarkup:
+    MESES = ["", "Enero", "Feb", "Mar", "Abr", "May", "Jun",
+             "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+    prev_m = month - 1 if month > 1 else 12
+    prev_y = year if month > 1 else year - 1
+    next_m = month + 1 if month < 12 else 1
+    next_y = year if month < 12 else year + 1
+
+    rows = []
+    rows.append([
+        InlineKeyboardButton("◀", callback_data=f"calNav_{task_id}_{prev_y}_{prev_m:02d}"),
+        InlineKeyboardButton(f"{MESES[month]} {year}", callback_data="calIgnore"),
+        InlineKeyboardButton("▶", callback_data=f"calNav_{task_id}_{next_y}_{next_m:02d}"),
+    ])
+    rows.append([InlineKeyboardButton(d, callback_data="calIgnore")
+                 for d in ["Lu", "Ma", "Mi", "Ju", "Vi", "Sa", "Do"]])
+    today = datetime.now(TZ_ARG).date()
+    for week in cal_module.monthcalendar(year, month):
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(" ", callback_data="calIgnore"))
+            else:
+                d = date(year, month, day)
+                label = f"·{day}·" if d == today else str(day)
+                row.append(InlineKeyboardButton(
+                    label, callback_data=f"calDay_{task_id}_{year}-{month:02d}-{day:02d}"
+                ))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Sin fecha", callback_data=f"calDay_{task_id}_ninguna")])
+    return InlineKeyboardMarkup(rows)
 
 def sheets_update_fecha(task_id: str, fecha: str) -> bool:
     ws = _sheets_client()
@@ -348,11 +381,12 @@ def build_tasks_footer() -> str:
     if not tasks:
         lines = ["📋 *Tareas pendientes:*", "_No hay tareas pendientes\\._"]
     else:
-        tasks_sorted = sorted(tasks, key=lambda t: int(t.get("prioridad") or 0), reverse=False)
+        def sort_key(t):
+            f = str(t.get("fecha", "")).strip()
+            return f if f else "9999-99-99"
+        tasks_sorted = sorted(tasks, key=sort_key)
         lines = ["📋 *Tareas pendientes:*"]
         for i, t in enumerate(tasks_sorted, 1):
-            stars = int(t.get("prioridad") or 0)
-            star_str = ("⭐" * stars + " ") if stars > 0 else ""
             fecha = str(t.get("fecha", "")).strip()
             fecha_str = ""
             if fecha:
@@ -360,7 +394,7 @@ def build_tasks_footer() -> str:
                     fecha_str = " — " + datetime.strptime(fecha, "%Y-%m-%d").strftime("%d/%m")
                 except Exception:
                     fecha_str = f" — {fecha}"
-            lines.append(f"{i}\\. {star_str}{escape_md(t['tarea'])}{escape_md(fecha_str)}")
+            lines.append(f"{i}\\. {escape_md(t['tarea'])}{escape_md(fecha_str)}")
     lines.append("")
     lines.append("_Usá \\.texto para agregar tarea\\. Usá \\.número para eliminar\\._")
     return "\n".join(lines)
@@ -388,20 +422,12 @@ async def process_text(text: str, update: Update, context: ContextTypes.DEFAULT_
     if m:
         task_text = m.group(1).strip()
         task = sheets_add_task(task_text)
-        keyboard = [
-            [
-                InlineKeyboardButton("⭐",     callback_data=f"prio_{task['id']}_1"),
-                InlineKeyboardButton("⭐⭐",   callback_data=f"prio_{task['id']}_2"),
-                InlineKeyboardButton("⭐⭐⭐", callback_data=f"prio_{task['id']}_3"),
-                InlineKeyboardButton("⭐⭐⭐⭐",   callback_data=f"prio_{task['id']}_4"),
-                InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"prio_{task['id']}_5"),
-            ],
-            [InlineKeyboardButton("Sin prioridad", callback_data=f"prio_{task['id']}_0")],
-        ]
+        now = datetime.now(TZ_ARG)
+        keyboard = build_calendar_keyboard(task["id"], now.year, now.month)
         await update.message.reply_text(
-            f"✅ Tarea agregada: _{escape_md(task_text)}_\n\n¿Qué prioridad le ponés?",
+            f"✅ Tarea agregada: _{escape_md(task_text)}_\n\n¿Fecha límite?",
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=keyboard,
         )
         return
 
@@ -428,54 +454,33 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🎙 _Transcripción:_ {escape_md(transcribed)}", parse_mode="MarkdownV2")
     await process_text(transcribed, update, context)
 
-# ── Priority callback ─────────────────────────────────────────────────────────
-async def handle_priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ── Calendar callbacks ────────────────────────────────────────────────────────
+async def handle_cal_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    logger.info(f"Callback recibido: {query.data}")
     await query.answer()
-    try:
-        parts = query.data.split("_", 2)
-        task_id, stars_str = parts[1], parts[2]
-        stars = int(stars_str)
-        sheets_update_priority(task_id, stars)
-        star_display = "⭐" * stars if stars > 0 else "sin prioridad"
-        keyboard = [[
-            InlineKeyboardButton("Hoy",      callback_data=f"fecha_{task_id}_hoy"),
-            InlineKeyboardButton("Mañana",   callback_data=f"fecha_{task_id}_manana"),
-            InlineKeyboardButton("En 7 días", callback_data=f"fecha_{task_id}_semana"),
-            InlineKeyboardButton("Sin fecha", callback_data=f"fecha_{task_id}_ninguna"),
-        ]]
-        await query.edit_message_text(
-            f"✅ Prioridad: {escape_md(star_display)}\\. ¿Fecha límite?",
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-    except Exception as e:
-        logger.error(f"Error en priority callback: {e}")
-        await query.edit_message_text(f"❌ Error al guardar prioridad: {e}")
+    if query.data == "calIgnore":
+        return
+    parts = query.data.split("_", 3)
+    task_id, year, month = parts[1], int(parts[2]), int(parts[3])
+    await query.edit_message_reply_markup(
+        reply_markup=build_calendar_keyboard(task_id, year, month)
+    )
 
-# ── Fecha callback ────────────────────────────────────────────────────────────
-async def handle_fecha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    logger.info(f"Fecha callback: {query.data}")
     await query.answer()
     try:
         parts = query.data.split("_", 2)
-        task_id, tipo = parts[1], parts[2]
-        if tipo != "ninguna":
-            d = datetime.now(TZ_ARG)
-            if tipo == "manana":
-                d += timedelta(days=1)
-            elif tipo == "semana":
-                d += timedelta(days=7)
-            fecha = d.strftime("%Y-%m-%d")
-            sheets_update_fecha(task_id, fecha)
+        task_id, fecha_val = parts[1], parts[2]
+        if fecha_val != "ninguna":
+            sheets_update_fecha(task_id, fecha_val)
+            d = datetime.strptime(fecha_val, "%Y-%m-%d")
             msg = f"✅ Fecha límite: {escape_md(d.strftime('%d/%m'))}\n\n"
         else:
             msg = "✅ Sin fecha límite\n\n"
         await query.edit_message_text(msg + build_tasks_footer(), parse_mode="MarkdownV2")
     except Exception as e:
-        logger.error(f"Error en fecha callback: {e}")
+        logger.error(f"Error en cal_day callback: {e}")
         await query.edit_message_text(f"❌ Error: {e}")
 
 # ── Daily summary ─────────────────────────────────────────────────────────────
@@ -508,8 +513,8 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(CallbackQueryHandler(handle_priority_callback, pattern=r"^prio_"))
-    app.add_handler(CallbackQueryHandler(handle_fecha_callback, pattern=r"^fecha_"))
+    app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
+    app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
 
     scheduler = AsyncIOScheduler(timezone=TZ_ARG)
     scheduler.add_job(
