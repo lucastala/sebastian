@@ -412,6 +412,25 @@ def build_tasks_footer() -> str:
 async def process_text(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = text.strip()
 
+    # .hoy / .mañana → eventos de calendar
+    if text.lower() in (".hoy", ".manana", ".mañana"):
+        fecha = _today_str() if text.lower() == ".hoy" else (datetime.now(TZ_ARG) + timedelta(days=1)).strftime("%Y-%m-%d")
+        events = cal_get_events_by_date(fecha)
+        label = "hoy" if text.lower() == ".hoy" else "mañana"
+        if events:
+            lines = [f"📅 *Eventos de {label}:*"]
+            for e in events:
+                lines.append(f"\\- {escape_md(e['hora'])} {escape_md(e['nombre'])}")
+        else:
+            lines = [f"📅 No hay eventos {label}\\."]
+        await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+        return
+
+    # .lista → tareas pendientes
+    if text.lower() == ".lista":
+        await update.message.reply_text(build_tasks_footer(), parse_mode="MarkdownV2")
+        return
+
     # .número → eliminar tarea
     m = re.match(r"^\.(\d+)$", text)
     if m:
