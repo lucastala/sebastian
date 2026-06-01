@@ -402,8 +402,8 @@ def build_tasks_footer() -> str:
         lines = ["📋 *Tareas pendientes:*"]
         for i, t in enumerate(tasks_sorted, 1):
             fecha = str(t.get("fecha", "")).strip()
-            fecha_str = f" — {format_fecha_display(fecha)}" if fecha else ""
-            lines.append(f"{i}\\. {escape_md(t['tarea'])}{escape_md(fecha_str)}")
+            fecha_str = f" — *{escape_md(format_fecha_display(fecha))}*" if fecha else ""
+            lines.append(f"{i}\\. {escape_md(t['tarea'])}{fecha_str}")
     lines.append("")
     lines.append("_Usá \\.texto para agregar tarea\\. Usá \\.número para eliminar\\._")
     return "\n".join(lines)
