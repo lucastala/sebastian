@@ -155,7 +155,7 @@ def sheets_delete_task_by_position(pos: int) -> str | None:
     ws = _sheets_client()
     all_rows = ws.get_all_records()
     pending = [r for r in all_rows if str(r.get("estado", "")).strip().lower() == "pendiente"]
-    pending = sorted(pending, key=lambda t: str(t.get("fecha", "")).strip() or "9999-99-99")
+    pending = _sort_tasks(pending)
     if pos < 1 or pos > len(pending):
         return None
     target = pending[pos - 1]
@@ -390,20 +390,24 @@ def transcribe_audio(file_path: str) -> str:
     return transcript.text
 
 # ── Pending tasks footer ───────────────────────────────────────────────────────
+def _sort_tasks(tasks: list) -> list:
+    no_date = [t for t in tasks if not str(t.get("fecha", "")).strip()]
+    dated   = sorted([t for t in tasks if str(t.get("fecha", "")).strip()],
+                     key=lambda t: str(t.get("fecha", "")), reverse=True)
+    return no_date + dated
+
 def build_tasks_footer() -> str:
     tasks = sheets_get_pending()
     if not tasks:
         lines = ["📋 *Tareas pendientes:*", "_No hay tareas pendientes\\._"]
     else:
-        def sort_key(t):
-            f = str(t.get("fecha", "")).strip()
-            return f if f else "9999-99-99"
-        tasks_sorted = sorted(tasks, key=sort_key)
         lines = ["📋 *Tareas pendientes:*"]
-        for i, t in enumerate(tasks_sorted, 1):
+        for i, t in enumerate(_sort_tasks(tasks), 1):
             fecha = str(t.get("fecha", "")).strip()
-            fecha_str = f" — *{escape_md(format_fecha_display(fecha))}*" if fecha else ""
-            lines.append(f"{i}\\. {escape_md(t['tarea'])}{fecha_str}")
+            if fecha:
+                lines.append(f"{i}\\. *{escape_md(format_fecha_display(fecha))}* — {escape_md(t['tarea'])}")
+            else:
+                lines.append(f"{i}\\. {escape_md(t['tarea'])}")
     lines.append("")
     lines.append("_Usá \\.texto para agregar tarea\\. Usá \\.número para eliminar\\._")
     return "\n".join(lines)
