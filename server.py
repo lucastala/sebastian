@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import secrets
 
 import httpx
 from dotenv import load_dotenv
@@ -21,9 +20,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sebastian SaaS — OAuth Server")
-
-# Guardamos el flow en memoria entre start y callback
-_pending_flows: dict = {}
 
 SCOPES = [
     "openid",
@@ -88,25 +84,20 @@ def _build_flow() -> Flow:
 @app.get("/oauth/start")
 async def oauth_start(chat_id: int):
     flow = _build_flow()
-
-    state = secrets.token_urlsafe(16)
+    # chat_id va directo en state — sobrevive reinicios del servidor
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        state=state,
+        state=str(chat_id),
         prompt="consent",
     )
-
-    # Guardar flow y chat_id asociado al state
-    _pending_flows[state] = {"flow": flow, "chat_id": chat_id}
-
     return RedirectResponse(auth_url)
 
 
 @app.get("/oauth/callback")
 async def oauth_callback(request: Request):
     code = request.query_params.get("code")
-    state = request.query_params.get("state")
+    state = request.query_params.get("state")  # es el chat_id
 
     if not code or not state:
         return HTMLResponse(
@@ -114,18 +105,17 @@ async def oauth_callback(request: Request):
             status_code=400,
         )
 
-    pending = _pending_flows.pop(state, None)
-    if not pending:
+    try:
+        chat_id = int(state)
+    except ValueError:
         return HTMLResponse(
-            _ERROR_HTML.format(message="Sesión expirada. Intentá de nuevo."),
-            status_code=400,
+            _ERROR_HTML.format(message="Estado inválido."), status_code=400
         )
 
-    flow = pending["flow"]
-    chat_id = pending["chat_id"]
-
+    # Reconstruimos el flow — es determinístico, no necesita estado en memoria
     loop = asyncio.get_running_loop()
     try:
+        flow = _build_flow()
         await loop.run_in_executor(None, lambda: flow.fetch_token(code=code))
     except Exception as e:
         logger.error(f"Token exchange failed for chat_id={chat_id}: {e}")
