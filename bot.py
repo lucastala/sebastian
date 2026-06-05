@@ -1,3 +1,4 @@
+import calendar as cal_module
 import io
 import json
 import logging
@@ -7,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -25,6 +27,7 @@ from google_services import (
     get_pending_tasks,
     get_today_events,
     search_event,
+    update_task_fecha,
 )
 
 load_dotenv()
@@ -40,6 +43,10 @@ openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "https://tu-link-de-pago.com")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 ARGENTINA_TZ = timezone(timedelta(hours=-3))
+
+DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+MESES_ES = ["", "ene", "feb", "mar", "abr", "may", "jun",
+            "jul", "ago", "sep", "oct", "nov", "dic"]
 
 OPENAI_TOOLS = [
     {
@@ -120,6 +127,74 @@ OPENAI_TOOLS = [
 ]
 
 
+# ── Date helpers ──────────────────────────────────────────────────────────────
+
+def _format_fecha(fecha_str: str) -> str:
+    """Returns e.g. 'martes 3' or 'martes 3 jun' if different month."""
+    try:
+        d = datetime.strptime(fecha_str, "%Y-%m-%d")
+        hoy = datetime.now(ARGENTINA_TZ)
+        nombre = DIAS_ES[d.weekday()]
+        if d.month == hoy.month and d.year == hoy.year:
+            return f"{nombre} {d.day}"
+        return f"{nombre} {d.day} {MESES_ES[d.month]}"
+    except Exception:
+        return fecha_str
+
+
+def _sort_tasks(tasks: list[dict]) -> list[dict]:
+    """No-date tasks first, then dated tasks most-distant→most-recent (top→bottom)."""
+    no_date = [t for t in tasks if not str(t.get("fecha", "")).strip()]
+    dated = sorted(
+        [t for t in tasks if str(t.get("fecha", "")).strip()],
+        key=lambda t: str(t["fecha"]),
+        reverse=True,
+    )
+    return no_date + dated
+
+
+# ── Calendar keyboard ─────────────────────────────────────────────────────────
+
+def _build_calendar_keyboard(task_id: str, year: int, month: int) -> InlineKeyboardMarkup:
+    MESES = ["", "Enero", "Feb", "Mar", "Abr", "May", "Jun",
+             "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+    prev_m = month - 1 if month > 1 else 12
+    prev_y = year if month > 1 else year - 1
+    next_m = month + 1 if month < 12 else 1
+    next_y = year if month < 12 else year + 1
+
+    rows = []
+    rows.append([
+        InlineKeyboardButton("◀", callback_data=f"calNav_{task_id}_{prev_y}_{prev_m:02d}"),
+        InlineKeyboardButton(f"{MESES[month]} {year}", callback_data="calIgnore"),
+        InlineKeyboardButton("▶", callback_data=f"calNav_{task_id}_{next_y}_{next_m:02d}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(d, callback_data="calIgnore")
+        for d in ["Lu", "Ma", "Mi", "Ju", "Vi", "Sa", "Do"]
+    ])
+
+    now = datetime.now(ARGENTINA_TZ)
+    for week in cal_module.monthcalendar(year, month):
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(" ", callback_data="calIgnore"))
+            else:
+                is_today = (day == now.day and month == now.month and year == now.year)
+                label = f"[{day}]" if is_today else str(day)
+                row.append(InlineKeyboardButton(
+                    label,
+                    callback_data=f"calDay_{task_id}_{year}-{month:02d}-{day:02d}",
+                ))
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton("Sin fecha →", callback_data=f"calDay_{task_id}_ninguna")])
+    return InlineKeyboardMarkup(rows)
+
+
+# ── Tasks footer ──────────────────────────────────────────────────────────────
+
 async def build_tasks_footer(user: dict) -> str:
     try:
         tasks = await get_pending_tasks(user)
@@ -130,12 +205,18 @@ async def build_tasks_footer(user: dict) -> str:
     if not tasks:
         return "No tenés tareas pendientes.\n\nUsá .texto para agregar tarea."
 
-    lines = ["📋 Tareas pendientes:"]
-    for i, task in enumerate(tasks, 1):
-        lines.append(f"{i}. {task['tarea']}")
+    lines = ["📋 *Tareas pendientes:*"]
+    for i, task in enumerate(_sort_tasks(tasks), 1):
+        fecha = str(task.get("fecha", "")).strip()
+        if fecha:
+            lines.append(f"{i}. *{_format_fecha(fecha)}* — {task['tarea']}")
+        else:
+            lines.append(f"{i}. {task['tarea']}")
     lines.append("\nUsá .texto para agregar tarea. Usá .número para eliminar.")
     return "\n".join(lines)
 
+
+# ── OpenAI ────────────────────────────────────────────────────────────────────
 
 async def _execute_tool(func_name: str, func_args: dict, user: dict):
     if func_name == "get_today_events":
@@ -215,12 +296,47 @@ async def _transcribe_voice(voice_bytes: bytes) -> str:
     return result.text
 
 
+# ── Calendar callbacks ────────────────────────────────────────────────────────
+
+async def handle_cal_nav(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "calIgnore":
+        return
+    _, task_id, year, month = query.data.split("_", 3)
+    await query.edit_message_reply_markup(
+        reply_markup=_build_calendar_keyboard(task_id, int(year), int(month))
+    )
+
+
+async def handle_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user:
+        return
+
+    _, task_id, fecha_val = query.data.split("_", 2)
+
+    if fecha_val != "ninguna":
+        await update_task_fecha(user, task_id, fecha_val)
+        header = f"✅ Fecha límite: *{_format_fecha(fecha_val)}*\n\n"
+    else:
+        header = "✅ Sin fecha límite\n\n"
+
+    footer = await build_tasks_footer(user)
+    await query.edit_message_text(header + footer, parse_mode="Markdown")
+
+
+# ── Message routing ───────────────────────────────────────────────────────────
+
 async def _route_text(
     update: Update, context: ContextTypes.DEFAULT_TYPE, user: dict, text: str
 ) -> None:
     message = update.message
 
-    # Dot commands ───────────────────────────────────────────────────────────
     if text.startswith("."):
         content = text[1:].strip()
 
@@ -232,17 +348,33 @@ async def _route_text(
                 if success
                 else f"⚠️ No encontré la tarea #{pos}.\n\n"
             )
-        elif content:
-            await add_task(user, content)
-            prefix = f"✅ Tarea agregada: {content}\n\n"
-        else:
-            prefix = "⚠️ Usá .texto para agregar o .número para eliminar.\n\n"
+            footer = await build_tasks_footer(user)
+            await message.reply_text(prefix + footer, parse_mode="Markdown")
 
-        footer = await build_tasks_footer(user)
-        await message.reply_text(prefix + footer)
+        elif content:
+            task_id = await add_task(user, content)
+            if task_id:
+                now = datetime.now(ARGENTINA_TZ)
+                keyboard = _build_calendar_keyboard(task_id, now.year, now.month)
+                await message.reply_text(
+                    f"✅ Tarea agregada: *{content}*\n\n¿Fecha límite?",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard,
+                )
+            else:
+                await message.reply_text(
+                    "⚠️ No se pudo agregar la tarea. "
+                    "Completá la configuración de Google primero."
+                )
+        else:
+            footer = await build_tasks_footer(user)
+            await message.reply_text(
+                "⚠️ Usá .texto para agregar o .número para eliminar.\n\n" + footer,
+                parse_mode="Markdown",
+            )
         return
 
-    # OpenAI function calling ────────────────────────────────────────────────
+    # OpenAI function calling
     try:
         reply = await _call_openai(user, text)
     except Exception as e:
@@ -250,8 +382,10 @@ async def _route_text(
         reply = "⚠️ Tuve un error procesando tu mensaje. Intentá de nuevo."
 
     footer = await build_tasks_footer(user)
-    await message.reply_text(reply + "\n\n" + footer)
+    await message.reply_text(reply + "\n\n" + footer, parse_mode="Markdown")
 
+
+# ── Main handlers ─────────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
@@ -261,12 +395,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = update.effective_chat.id
     user = await get_user(chat_id)
 
-    # New user — start onboarding
     if user is None:
         await _start_onboarding(update)
         return
 
-    # OAuth not completed yet
     if not user.get("access_token"):
         oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
         await message.reply_text(
@@ -275,7 +407,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Subscription check
     if user.get("estado_suscripcion") not in ("activo", "trial"):
         await message.reply_text(
             f"⚠️ Tu suscripción no está activa.\n\nActivá tu plan aquí:\n{PAYMENT_LINK}"
@@ -284,7 +415,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await message.reply_chat_action("typing")
 
-    # Voice → transcribe → re-route
     if message.voice:
         try:
             voice_file = await message.voice.get_file()
@@ -293,9 +423,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await message.reply_text(f"🗣️ Transcripción: {text}")
         except Exception as e:
             logger.error(f"Voice transcription error for user {chat_id}: {e}")
-            await message.reply_text(
-                "⚠️ No pude transcribir el audio. Intentá de nuevo."
-            )
+            await message.reply_text("⚠️ No pude transcribir el audio. Intentá de nuevo.")
             return
     else:
         text = message.text or ""
@@ -372,9 +500,11 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
+    app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
+    app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
 
     logger.info("Bot starting — polling for updates")
-    app.run_polling(allowed_updates=["message"])
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import os
 import asyncio
+import calendar as cal_module
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -90,22 +91,46 @@ async def get_pending_tasks(user: dict) -> list[dict]:
     return await loop.run_in_executor(None, _get)
 
 
-async def add_task(user: dict, tarea: str) -> bool:
+async def add_task(user: dict, tarea: str) -> str | None:
+    """Add task and return its id, or None if sheets_id is not set."""
     if not user.get("sheets_id"):
-        return False
+        return None
 
     creds = await refresh_user_credentials(user)
-    task_id = str(int(datetime.now().timestamp()))
-    fecha = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+    task_id = str(int(datetime.now().timestamp() * 1000))
     loop = asyncio.get_running_loop()
 
     def _add():
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(user["sheets_id"])
-        sh.sheet1.append_row([task_id, tarea, "pendiente", "", fecha])
-        return True
+        sh.sheet1.append_row([task_id, tarea, "pendiente", "", ""])
+        return task_id
 
     return await loop.run_in_executor(None, _add)
+
+
+async def update_task_fecha(user: dict, task_id: str, fecha: str) -> bool:
+    """Set the fecha column for a specific task by its id."""
+    if not user.get("sheets_id"):
+        return False
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _update():
+        gc = gspread.authorize(creds)
+        ws = gc.open_by_key(user["sheets_id"]).sheet1
+        records = ws.get_all_records()
+        all_ids = [str(r.get("id", "")) for r in records]
+        if task_id not in all_ids:
+            return False
+        row_idx = all_ids.index(task_id) + 2  # +2: header row + 0-index
+        headers = ws.row_values(1)
+        fecha_col = headers.index("fecha") + 1
+        ws.update_cell(row_idx, fecha_col, fecha)
+        return True
+
+    return await loop.run_in_executor(None, _update)
 
 
 async def delete_task_by_position(user: dict, position: int) -> bool:
@@ -120,7 +145,6 @@ async def delete_task_by_position(user: dict, position: int) -> bool:
         gc = gspread.authorize(creds)
         ws = gc.open_by_key(user["sheets_id"]).sheet1
         records = ws.get_all_records()
-        # row index in sheet: header is row 1, first record is row 2
         pending = [
             (idx + 2, r)
             for idx, r in enumerate(records)
