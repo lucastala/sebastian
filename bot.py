@@ -67,6 +67,18 @@ def _add_to_history(chat_id: int, user_msg: str, assistant_msg: str) -> None:
     if len(history) > MAX_HISTORY_EXCHANGES * 2:
         _conversation_history[chat_id] = history[-(MAX_HISTORY_EXCHANGES * 2):]
 
+
+_DELETE_STEMS = ("elimin", "borr", "quita", "quitá", "sacá", "sacame", "remov")
+_TASK_WORDS = ("tarea", "tareas")
+
+
+def _is_event_delete_intent(text: str) -> bool:
+    """True when the message is clearly about deleting a calendar event."""
+    t = text.lower()
+    has_delete = any(t.startswith(w) or f" {w}" in t for w in _DELETE_STEMS)
+    has_task = any(w in t for w in _TASK_WORDS)
+    return has_delete and not has_task
+
 OPENAI_TOOLS = [
     {
         "type": "function",
@@ -391,11 +403,17 @@ async def _call_openai(
     # Build messages: system + history + current
     messages = [system_msg] + _get_history(chat_id) + [{"role": "user", "content": text}]
 
+    # Force delete_event tool when intent is clear — gpt-4o-mini won't call it otherwise
+    if _is_event_delete_intent(text):
+        tool_choice: str | dict = {"type": "function", "name": "delete_event"}
+    else:
+        tool_choice = "auto"
+
     response = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
         tools=OPENAI_TOOLS,
-        tool_choice="auto",
+        tool_choice=tool_choice,
     )
 
     msg = response.choices[0].message
