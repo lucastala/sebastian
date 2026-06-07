@@ -405,7 +405,7 @@ async def _call_openai(
 
     # Force delete_event tool when intent is clear — gpt-4o-mini won't call it otherwise
     if _is_event_delete_intent(text):
-        tool_choice: str | dict = {"type": "function", "name": "delete_event"}
+        tool_choice: str | dict = {"type": "function", "function": {"name": "delete_event"}}
     else:
         tool_choice = "auto"
 
