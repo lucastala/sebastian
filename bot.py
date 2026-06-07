@@ -146,10 +146,11 @@ OPENAI_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "propose_delete_event",
+            "name": "delete_event",
             "description": (
-                "Muestra un botón de confirmación para eliminar un evento. "
-                "Usar cuando el usuario quiere eliminar un evento del calendario."
+                "Elimina un evento del Google Calendar. "
+                "Antes de llamar esta función, buscá el evento con search_event "
+                "o get_events_by_date para obtener su ID."
             ),
             "parameters": {
                 "type": "object",
@@ -164,7 +165,7 @@ OPENAI_TOOLS = [
                     },
                     "event_time": {
                         "type": "string",
-                        "description": "Hora o fecha del evento para mostrar al usuario",
+                        "description": "Hora o fecha del evento",
                     },
                 },
                 "required": ["event_id", "event_name"],
@@ -378,11 +379,10 @@ async def _call_openai(
             "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), "
             "usá siempre HH:00 como minutos. "
             "\n\nREGLA OBLIGATORIA PARA ELIMINAR EVENTOS: "
-            "Cuando el usuario quiera eliminar un evento, NUNCA respondas con texto pidiendo confirmación. "
-            "El flujo obligatorio es: "
+            "Cuando el usuario quiera eliminar un evento, el flujo OBLIGATORIO es: "
             "1) Buscá el evento con search_event o get_events_by_date para obtener su ID. "
-            "2) Llamá propose_delete_event con ese ID. Eso muestra el botón de confirmación. "
-            "NUNCA pidas confirmación con texto. NUNCA elimines sin pasar por propose_delete_event."
+            "2) Llamá delete_event con ese ID. El sistema muestra automáticamente un botón de confirmación. "
+            "NUNCA respondas con texto diciendo que vas a eliminar. SIEMPRE llamá delete_event."
             "\n\nREGLA PARA EDITAR EVENTOS: "
             "Cuando el usuario quiera editar un evento (cambiar hora, nombre o fecha), "
             "primero buscalo con search_event o get_events_by_date para obtener su ID, "
@@ -418,7 +418,7 @@ async def _call_openai(
         func_args = json.loads(tc.function.arguments)
         logger.info(f"Tool call: {func_name}({func_args}) for user {chat_id}")
 
-        if func_name == "propose_delete_event":
+        if func_name == "delete_event":
             event_id = func_args["event_id"]
             event_name = func_args.get("event_name", "evento")
             event_time = func_args.get("event_time", "")
@@ -433,7 +433,7 @@ async def _call_openai(
                 "tool_call_id": tc.id,
                 "role": "tool",
                 "name": func_name,
-                "content": "Confirmación mostrada al usuario.",
+                "content": "Mostrando botón de confirmación al usuario.",
             })
         else:
             result = await _execute_tool(func_name, func_args, user)
