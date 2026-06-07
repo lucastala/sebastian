@@ -148,27 +148,23 @@ OPENAI_TOOLS = [
         "function": {
             "name": "delete_event",
             "description": (
-                "Elimina un evento del Google Calendar. "
-                "Antes de llamar esta función, buscá el evento con search_event "
-                "o get_events_by_date para obtener su ID."
+                "Busca un evento en el calendario por nombre y fecha, y muestra "
+                "un botón de confirmación para eliminarlo. "
+                "Llamá esta función directamente cuando el usuario quiera eliminar un evento."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "event_id": {
+                    "query": {
                         "type": "string",
-                        "description": "ID del evento a eliminar",
+                        "description": "Nombre o descripción del evento a eliminar",
                     },
-                    "event_name": {
+                    "fecha": {
                         "type": "string",
-                        "description": "Nombre del evento",
-                    },
-                    "event_time": {
-                        "type": "string",
-                        "description": "Hora o fecha del evento",
+                        "description": "Fecha del evento en formato YYYY-MM-DD (opcional pero recomendado)",
                     },
                 },
-                "required": ["event_id", "event_name"],
+                "required": ["query"],
             },
         },
     },
@@ -379,10 +375,9 @@ async def _call_openai(
             "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), "
             "usá siempre HH:00 como minutos. "
             "\n\nREGLA OBLIGATORIA PARA ELIMINAR EVENTOS: "
-            "Cuando el usuario quiera eliminar un evento, el flujo OBLIGATORIO es: "
-            "1) Buscá el evento con search_event o get_events_by_date para obtener su ID. "
-            "2) Llamá delete_event con ese ID. El sistema muestra automáticamente un botón de confirmación. "
-            "NUNCA respondas con texto diciendo que vas a eliminar. SIEMPRE llamá delete_event."
+            "Cuando el usuario quiera eliminar un evento, llamá INMEDIATAMENTE delete_event "
+            "con el nombre del evento y la fecha. NO busques el evento antes, NO pidas confirmación con texto. "
+            "El sistema se encarga de buscar el evento y mostrar el botón de confirmación."
             "\n\nREGLA PARA EDITAR EVENTOS: "
             "Cuando el usuario quiera editar un evento (cambiar hora, nombre o fecha), "
             "primero buscalo con search_event o get_events_by_date para obtener su ID, "
@@ -419,22 +414,45 @@ async def _call_openai(
         logger.info(f"Tool call: {func_name}({func_args}) for user {chat_id}")
 
         if func_name == "delete_event":
-            event_id = func_args["event_id"]
-            event_name = func_args.get("event_name", "evento")
-            event_time = func_args.get("event_time", "")
-            label = f"🗑️ Sí, eliminar — {event_name}"
-            if event_time:
-                label = f"🗑️ Sí, eliminar — {event_name} ({event_time})"
-            pending_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(label, callback_data=f"delEvent_{event_id}"),
-                InlineKeyboardButton("❌ No", callback_data="delEventCancel"),
-            ]])
-            messages.append({
-                "tool_call_id": tc.id,
-                "role": "tool",
-                "name": func_name,
-                "content": "Mostrando botón de confirmación al usuario.",
-            })
+            query = func_args.get("query", "")
+            fecha = func_args.get("fecha")
+            # Search for the event internally
+            if fecha:
+                events = await get_events_by_date(user, fecha)
+                matched = [e for e in events if query.lower() in e.get("nombre", "").lower()]
+                if not matched:
+                    matched = events  # fallback: show all events for that date
+            else:
+                matched = await search_event(user, query)
+
+            if not matched:
+                messages.append({
+                    "tool_call_id": tc.id,
+                    "role": "tool",
+                    "name": func_name,
+                    "content": "No se encontró ningún evento con ese nombre.",
+                })
+            else:
+                ev = matched[0]
+                event_id = ev["id"]
+                event_name = ev.get("nombre", "evento")
+                inicio = ev.get("inicio", "")
+                try:
+                    dt = datetime.fromisoformat(inicio)
+                    time_str = dt.strftime("%d/%m %H:%M")
+                    label = f"🗑️ Sí, eliminar — {event_name} ({time_str})"
+                except Exception:
+                    label = f"🗑️ Sí, eliminar — {event_name}"
+                pending_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(label, callback_data=f"delEvent_{event_id}"),
+                    InlineKeyboardButton("❌ No", callback_data="delEventCancel"),
+                ]])
+                messages.append({
+                    "tool_call_id": tc.id,
+                    "role": "tool",
+                    "name": func_name,
+                    "content": f"Evento encontrado: {event_name}. Mostrando botón de confirmación.",
+                })
         else:
             result = await _execute_tool(func_name, func_args, user)
             messages.append({
