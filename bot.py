@@ -70,14 +70,32 @@ def _add_to_history(chat_id: int, user_msg: str, assistant_msg: str) -> None:
 
 _DELETE_STEMS = ("elimin", "borr", "quita", "quitá", "sacá", "sacame", "remov")
 _TASK_WORDS = ("tarea", "tareas")
+_RENAME_TASK_STEMS = ("renombr", "renombrá")
+_EDIT_TASK_PHRASES = ("cambiá la tarea", "cambia la tarea", "editá la tarea", "edita la tarea",
+                      "cambiá el nombre de la tarea", "cambia el nombre de la tarea")
+_EDIT_EVENT_STEMS = ("cambiá el evento", "cambia el evento", "editá el evento", "edita el evento",
+                     "cambiá la reunión", "cambia la reunión", "cambiá la hora", "cambia la hora",
+                     "pasá el evento", "mové el evento", "cambiá el turno", "cambia el turno")
 
 
 def _is_event_delete_intent(text: str) -> bool:
-    """True when the message is clearly about deleting a calendar event."""
     t = text.lower()
     has_delete = any(t.startswith(w) or f" {w}" in t for w in _DELETE_STEMS)
     has_task = any(w in t for w in _TASK_WORDS)
     return has_delete and not has_task
+
+
+def _is_task_edit_intent(text: str) -> bool:
+    t = text.lower()
+    has_rename = any(t.startswith(w) or f" {w}" in t for w in _RENAME_TASK_STEMS)
+    has_edit_phrase = any(p in t for p in _EDIT_TASK_PHRASES)
+    has_task = any(w in t for w in _TASK_WORDS)
+    return (has_rename or (has_edit_phrase and has_task))
+
+
+def _is_event_edit_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _EDIT_EVENT_STEMS)
 
 OPENAI_TOOLS = [
     {
@@ -403,9 +421,13 @@ async def _call_openai(
     # Build messages: system + history + current
     messages = [system_msg] + _get_history(chat_id) + [{"role": "user", "content": text}]
 
-    # Force delete_event tool when intent is clear — gpt-4o-mini won't call it otherwise
+    # Force specific tools when intent is clear — gpt-4o-mini hallucinates otherwise
     if _is_event_delete_intent(text):
         tool_choice: str | dict = {"type": "function", "function": {"name": "delete_event"}}
+    elif _is_task_edit_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "update_task"}}
+    elif _is_event_edit_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "update_event"}}
     else:
         tool_choice = "auto"
 
