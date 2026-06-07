@@ -395,7 +395,9 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
 async def _call_openai(
     user: dict, text: str
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    today = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+    now = datetime.now(ARGENTINA_TZ)
+    today = now.strftime("%Y-%m-%d")
+    dia_semana = DIAS_ES[now.weekday()]
     chat_id = user["chat_id"]
 
     system_msg = {
@@ -404,9 +406,9 @@ async def _call_openai(
             "Sos un asistente personal de productividad. "
             "Ayudás a gestionar tareas y eventos de Google Calendar. "
             "Respondé en español rioplatense, de forma concisa y amigable. "
-            f"La fecha de hoy es {today}. "
-            "Si el usuario menciona días relativos (mañana, el lunes, etc.), "
-            "calculá la fecha correcta a partir de hoy. "
+            f"La fecha de hoy es {today} ({dia_semana}). "
+            "Si el usuario menciona días relativos (mañana, el lunes, el próximo sábado, etc.), "
+            "calculá la fecha exacta a partir de hoy usando el día de la semana indicado. "
             "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), "
             "usá siempre HH:00 como minutos. "
             "\n\nREGLA OBLIGATORIA PARA ELIMINAR EVENTOS: "
