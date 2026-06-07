@@ -55,6 +55,17 @@ MESES_ES = ["", "ene", "feb", "mar", "abr", "may", "jun",
 _conversation_history: dict[int, list[dict]] = {}
 MAX_HISTORY_EXCHANGES = 8  # 8 user+assistant pairs = 16 messages
 
+# Pending event creates waiting for conflict confirmation
+_pending_event_creates: dict[int, dict] = {}
+
+
+def _within_minutes(inicio: str, target: datetime, window: timedelta) -> bool:
+    try:
+        ev_dt = datetime.fromisoformat(inicio)
+        return abs((ev_dt - target).total_seconds()) <= window.total_seconds()
+    except Exception:
+        return False
+
 
 def _get_history(chat_id: int) -> list[dict]:
     return list(_conversation_history.get(chat_id, []))
@@ -500,6 +511,36 @@ async def _call_openai(
                     "name": func_name,
                     "content": f"Evento encontrado: {event_name}. Mostrando botón de confirmación.",
                 })
+        elif func_name == "create_event" and func_args.get("hora"):
+            nombre = func_args["nombre"]
+            fecha = func_args["fecha"]
+            hora = func_args["hora"]
+            day_events = await get_events_by_date(user, fecha)
+            try:
+                target_dt = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=ARGENTINA_TZ)
+            except ValueError:
+                target_dt = None
+            conflicts = (
+                [ev for ev in day_events if _within_minutes(ev.get("inicio", ""), target_dt, timedelta(minutes=30))]
+                if target_dt else []
+            )
+            if conflicts:
+                _pending_event_creates[chat_id] = {"nombre": nombre, "fecha": fecha, "hora": hora}
+                conflict_names = ", ".join(f'"{ev["nombre"]}"' for ev in conflicts[:3])
+                pending_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Sí, agendar igual", callback_data="createConflict_yes"),
+                    InlineKeyboardButton("❌ Cancelar", callback_data="createConflict_no"),
+                ]])
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": f"Advertencia: hay evento(s) a menos de 30 minutos ({conflict_names}). Se le mostró al usuario la opción de agendar igual.",
+                })
+            else:
+                result = await _execute_tool(func_name, func_args, user)
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                })
         else:
             result = await _execute_tool(func_name, func_args, user)
             messages.append({
@@ -617,6 +658,37 @@ async def _route_text(
         parse_mode="Markdown",
         reply_markup=keyboard,
     )
+
+
+# ── Create event conflict confirmation callback ───────────────────────────────
+
+async def handle_create_conflict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+
+    if query.data == "createConflict_no":
+        _pending_event_creates.pop(chat_id, None)
+        await query.edit_message_text("❌ Evento no agendado.")
+        return
+
+    pending = _pending_event_creates.pop(chat_id, None)
+    if not pending:
+        await query.edit_message_text("⚠️ No había ningún evento pendiente.")
+        return
+
+    user = await get_user(chat_id)
+    if not user:
+        return
+
+    try:
+        await create_event(user, pending["nombre"], pending["fecha"], pending["hora"])
+        await query.edit_message_text(
+            f"✅ Evento creado: *{pending['nombre']}*", parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error creating event after conflict confirm: {e}")
+        await query.edit_message_text("⚠️ No se pudo crear el evento.")
 
 
 # ── Delete event confirmation callback ───────────────────────────────────────
@@ -761,6 +833,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
     app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
     app.add_handler(CallbackQueryHandler(handle_delete_event, pattern=r"^delEvent"))
+    app.add_handler(CallbackQueryHandler(handle_create_conflict, pattern=r"^createConflict_"))
 
     logger.info("Bot starting — polling for updates")
     app.run_polling(allowed_updates=["message", "callback_query"])
