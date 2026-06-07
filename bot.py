@@ -128,8 +128,11 @@ OPENAI_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "delete_event",
-            "description": "Elimina un evento del Google Calendar por su ID",
+            "name": "propose_delete_event",
+            "description": (
+                "Muestra un botón de confirmación para eliminar un evento. "
+                "Usar cuando el usuario quiere eliminar un evento del calendario."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -139,7 +142,11 @@ OPENAI_TOOLS = [
                     },
                     "event_name": {
                         "type": "string",
-                        "description": "Nombre del evento (para confirmar al usuario)",
+                        "description": "Nombre del evento",
+                    },
+                    "event_time": {
+                        "type": "string",
+                        "description": "Hora o fecha del evento para mostrar al usuario",
                     },
                 },
                 "required": ["event_id", "event_name"],
@@ -253,14 +260,12 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         )
     if func_name == "get_pending_tasks":
         return await get_pending_tasks(user)
-    if func_name == "delete_event":
-        success = await delete_event(user, func_args["event_id"])
-        name = func_args.get("event_name", "evento")
-        return {"eliminado": success, "nombre": name}
     return {"error": f"Función desconocida: {func_name}"}
 
 
-async def _call_openai(user: dict, text: str) -> str:
+async def _call_openai(
+    user: dict, text: str
+) -> tuple[str, InlineKeyboardMarkup | None]:
     today = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
     messages = [
         {
@@ -274,10 +279,9 @@ async def _call_openai(user: dict, text: str) -> str:
                 "calculá la fecha correcta a partir de hoy. "
                 "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), "
                 "usá siempre HH:00 como minutos. "
-                "IMPORTANTE: cuando el usuario pida eliminar un evento, "
-                "buscalo con search_event o get_events_by_date para obtener su ID, "
-                "y eliminalo directamente con delete_event SIN pedir confirmación. "
-                "El usuario ya confirmó con su mensaje, no vuelvas a preguntar."
+                "Cuando el usuario quiera eliminar un evento, primero buscalo con "
+                "search_event o get_events_by_date para obtener su ID, y luego "
+                "usá propose_delete_event para mostrarle la confirmación."
             ),
         },
         {"role": "user", "content": text},
@@ -293,28 +297,46 @@ async def _call_openai(user: dict, text: str) -> str:
     msg = response.choices[0].message
 
     if not msg.tool_calls:
-        return msg.content or "No pude procesar tu mensaje."
+        return msg.content or "No pude procesar tu mensaje.", None
 
     messages.append(msg)
+    pending_keyboard: InlineKeyboardMarkup | None = None
 
     for tc in msg.tool_calls:
         func_name = tc.function.name
         func_args = json.loads(tc.function.arguments)
         logger.info(f"Tool call: {func_name}({func_args}) for user {user['chat_id']}")
-        result = await _execute_tool(func_name, func_args, user)
-        messages.append(
-            {
+
+        if func_name == "propose_delete_event":
+            event_id = func_args["event_id"]
+            event_name = func_args.get("event_name", "evento")
+            event_time = func_args.get("event_time", "")
+            label = f"🗑️ Sí, eliminar — {event_name}"
+            if event_time:
+                label = f"🗑️ Sí, eliminar — {event_name} ({event_time})"
+            pending_keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(label, callback_data=f"delEvent_{event_id}"),
+                InlineKeyboardButton("❌ No", callback_data="delEventCancel"),
+            ]])
+            messages.append({
+                "tool_call_id": tc.id,
+                "role": "tool",
+                "name": func_name,
+                "content": "Confirmación mostrada al usuario.",
+            })
+        else:
+            result = await _execute_tool(func_name, func_args, user)
+            messages.append({
                 "tool_call_id": tc.id,
                 "role": "tool",
                 "name": func_name,
                 "content": json.dumps(result, ensure_ascii=False, default=str),
-            }
-        )
+            })
 
     final = await openai_client.chat.completions.create(
         model="gpt-4o-mini", messages=messages
     )
-    return final.choices[0].message.content or "Listo."
+    return final.choices[0].message.content or "Listo.", pending_keyboard
 
 
 async def _transcribe_voice(voice_bytes: bytes) -> str:
@@ -406,13 +428,41 @@ async def _route_text(
 
     # OpenAI function calling
     try:
-        reply = await _call_openai(user, text)
+        reply, keyboard = await _call_openai(user, text)
     except Exception as e:
         logger.error(f"OpenAI error for user {user['chat_id']}: {e}")
-        reply = "⚠️ Tuve un error procesando tu mensaje. Intentá de nuevo."
+        reply, keyboard = "⚠️ Tuve un error procesando tu mensaje. Intentá de nuevo.", None
 
     footer = await build_tasks_footer(user)
-    await message.reply_text(reply + "\n\n" + footer, parse_mode="Markdown")
+    await message.reply_text(
+        reply + "\n\n" + footer,
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+# ── Delete event confirmation callback ───────────────────────────────────────
+
+async def handle_delete_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "delEventCancel":
+        await query.edit_message_text("❌ Cancelado.")
+        return
+
+    event_id = query.data.split("_", 1)[1]
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user:
+        return
+
+    try:
+        await delete_event(user, event_id)
+        await query.edit_message_text("✅ Evento eliminado.")
+    except Exception as e:
+        logger.error(f"Error deleting event {event_id}: {e}")
+        await query.edit_message_text("⚠️ No se pudo eliminar el evento.")
 
 
 # ── Main handlers ─────────────────────────────────────────────────────────────
@@ -532,6 +582,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
     app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
     app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
+    app.add_handler(CallbackQueryHandler(handle_delete_event, pattern=r"^delEvent"))
 
     logger.info("Bot starting — polling for updates")
     app.run_polling(allowed_updates=["message", "callback_query"])
