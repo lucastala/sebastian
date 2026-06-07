@@ -251,6 +251,18 @@ async def search_event(user: dict, query: str) -> list[dict]:
     return await loop.run_in_executor(None, _search)
 
 
+async def delete_event(user: dict, event_id: str) -> bool:
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _delete():
+        service = build("calendar", "v3", credentials=creds)
+        service.events().delete(calendarId="primary", eventId=event_id).execute()
+        return True
+
+    return await loop.run_in_executor(None, _delete)
+
+
 async def create_event(
     user: dict, nombre: str, fecha: str, hora: Optional[str] = None
 ) -> dict:

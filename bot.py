@@ -22,6 +22,7 @@ from database import create_user, get_user
 from google_services import (
     add_task,
     create_event,
+    delete_event,
     delete_task_by_position,
     get_events_by_date,
     get_pending_tasks,
@@ -122,6 +123,27 @@ OPENAI_TOOLS = [
             "name": "get_pending_tasks",
             "description": "Obtiene las tareas pendientes del usuario desde Google Sheets",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_event",
+            "description": "Elimina un evento del Google Calendar por su ID",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {
+                        "type": "string",
+                        "description": "ID del evento a eliminar",
+                    },
+                    "event_name": {
+                        "type": "string",
+                        "description": "Nombre del evento (para confirmar al usuario)",
+                    },
+                },
+                "required": ["event_id", "event_name"],
+            },
         },
     },
 ]
@@ -231,6 +253,10 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         )
     if func_name == "get_pending_tasks":
         return await get_pending_tasks(user)
+    if func_name == "delete_event":
+        success = await delete_event(user, func_args["event_id"])
+        name = func_args.get("event_name", "evento")
+        return {"eliminado": success, "nombre": name}
     return {"error": f"Función desconocida: {func_name}"}
 
 
@@ -247,7 +273,11 @@ async def _call_openai(user: dict, text: str) -> str:
                 "Si el usuario menciona días relativos (mañana, el lunes, etc.), "
                 "calculá la fecha correcta a partir de hoy. "
                 "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), "
-                "usá siempre HH:00 como minutos."
+                "usá siempre HH:00 como minutos. "
+                "IMPORTANTE: cuando el usuario pida eliminar un evento, "
+                "buscalo con search_event o get_events_by_date para obtener su ID, "
+                "y eliminalo directamente con delete_event SIN pedir confirmación. "
+                "El usuario ya confirmó con su mensaje, no vuelvas a preguntar."
             ),
         },
         {"role": "user", "content": text},
