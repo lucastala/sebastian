@@ -72,7 +72,10 @@ _DELETE_STEMS = ("elimin", "borr", "quita", "quitá", "sacá", "sacame", "remov"
 _TASK_WORDS = ("tarea", "tareas")
 _RENAME_TASK_STEMS = ("renombr", "renombrá")
 _EDIT_TASK_PHRASES = ("cambiá la tarea", "cambia la tarea", "editá la tarea", "edita la tarea",
-                      "cambiá el nombre de la tarea", "cambia el nombre de la tarea")
+                      "cambiá el nombre de la tarea", "cambia el nombre de la tarea",
+                      "ponele fecha", "poné fecha", "pone fecha", "agregale fecha",
+                      "cambiá la fecha de la tarea", "cambia la fecha de la tarea",
+                      "cambiá la fecha", "cambia la fecha")
 _EDIT_EVENT_STEMS = ("cambiá el evento", "cambia el evento", "editá el evento", "edita el evento",
                      "cambiá la reunión", "cambia la reunión", "cambiá la hora", "cambia la hora",
                      "pasá el evento", "mové el evento", "cambiá el turno", "cambia el turno")
@@ -90,7 +93,9 @@ def _is_task_edit_intent(text: str) -> bool:
     has_rename = any(t.startswith(w) or f" {w}" in t for w in _RENAME_TASK_STEMS)
     has_edit_phrase = any(p in t for p in _EDIT_TASK_PHRASES)
     has_task = any(w in t for w in _TASK_WORDS)
-    return (has_rename or (has_edit_phrase and has_task))
+    # "la tarea N, ponele/cambiá..." — task number + modification verb
+    has_tarea_num = bool(re.search(r"tarea\s+\d", t))
+    return has_rename or has_edit_phrase or (has_tarea_num and has_task)
 
 
 def _is_event_edit_intent(text: str) -> bool:
