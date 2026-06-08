@@ -26,6 +26,15 @@ CREATE TABLE IF NOT EXISTS public.email_watches (
     UNIQUE(chat_id, email_address)
 );
 
+-- RLS for email_watches — mirror the usuarios policy so the backend can write
+ALTER TABLE public.email_watches ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Service role full access watches"
+    ON public.email_watches
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
 -- Enable Row Level Security
 ALTER TABLE public.usuarios ENABLE ROW LEVEL SECURITY;
 
