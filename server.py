@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from google_auth_oauthlib.flow import Flow
 
-from database import update_user_sheet_id, update_user_tokens
+from database import get_user, update_user_sheet_id, update_user_tokens
 from google_services import create_user_sheet
 
 load_dotenv()
@@ -173,12 +173,15 @@ async def oauth_callback(request: Request):
         email=email,
     )
 
-    try:
-        sheet_id = await create_user_sheet(credentials)
-        await update_user_sheet_id(chat_id, sheet_id)
-        logger.info(f"Created sheet {sheet_id} for chat_id={chat_id}")
-    except Exception as e:
-        logger.error(f"Failed to create sheet for chat_id={chat_id}: {e}")
+    # Only create sheet if user doesn't have one yet
+    existing_user = await get_user(chat_id)
+    if not existing_user or not existing_user.get("sheets_id"):
+        try:
+            sheet_id = await create_user_sheet(credentials)
+            await update_user_sheet_id(chat_id, sheet_id)
+            logger.info(f"Created sheet {sheet_id} for chat_id={chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to create sheet for chat_id={chat_id}: {e}")
 
     telegram_token = os.getenv("TELEGRAM_TOKEN")
     if telegram_token:
