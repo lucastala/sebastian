@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -7,7 +7,15 @@ from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
 
 from database import get_active_users, get_all_email_watches, get_user, update_watch_last_checked
-from google_services import get_today_events, get_pending_tasks, get_emails_from_since, GmailPermissionError
+from google_services import (
+    GmailPermissionError,
+    get_emails_from_since,
+    get_pending_tasks,
+    get_today_events,
+    log_due_fixed_expenses,
+)
+
+ARG_TZ = timezone(timedelta(hours=-3))
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +115,36 @@ async def check_email_watches(bot: Bot) -> None:
             logger.error(f"Error checking emails for {chat_id} / {email_address}: {e}")
 
 
+async def check_fixed_expenses(bot: Bot) -> None:
+    users = await get_active_users()
+    today = datetime.now(ARG_TZ)
+    logger.info(f"Checking fixed expenses for {len(users)} users")
+
+    for user in users:
+        if not user.get("access_token"):
+            continue
+        try:
+            logged = await log_due_fixed_expenses(user, today)
+            if not logged:
+                continue
+            lines = ["💳 *Gastos fijos cargados este mes:*"]
+            total = 0.0
+            for g in logged:
+                try:
+                    total += float(g["monto"])
+                except (ValueError, TypeError):
+                    pass
+                lines.append(f"• {g['nombre']}: ${g['monto']} ({g['categoria']})")
+            lines.append(f"\n*Total:* ${total:,.0f}")
+            text = "\n".join(lines)
+            try:
+                await bot.send_message(chat_id=user["chat_id"], text=text, parse_mode="Markdown")
+            except Exception:
+                await bot.send_message(chat_id=user["chat_id"], text=text)
+        except Exception as e:
+            logger.error(f"Error logging fixed expenses for {user['chat_id']}: {e}")
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=ARGENTINA_TZ)
     scheduler.add_job(
@@ -123,6 +161,14 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="email_watches",
         name="Email Watch Check",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_fixed_expenses,
+        CronTrigger(hour=9, minute=0, timezone=ARGENTINA_TZ),
+        args=[bot],
+        id="fixed_expenses",
+        name="Monthly Fixed Expenses Logging",
         replace_existing=True,
     )
     return scheduler

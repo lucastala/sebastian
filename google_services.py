@@ -520,13 +520,30 @@ async def add_expense(
     return await loop.run_in_executor(None, _add)
 
 
+def _filter_expense_rows(records, desde, hasta, categoria):
+    """Return [(row_idx, record), ...] matching filters, most recent first."""
+    out = []
+    for idx, r in enumerate(records):
+        f = str(r.get("fecha", "")).strip()
+        if desde and f < desde:
+            continue
+        if hasta and f > hasta:
+            continue
+        if categoria and str(r.get("categoria", "")).strip().lower() != categoria.lower():
+            continue
+        out.append((idx + 2, r))
+    out.reverse()  # most recent first — matches display enumeration
+    return out
+
+
 async def get_expenses(
     user: dict,
     desde: str | None = None,
     hasta: str | None = None,
     categoria: str | None = None,
 ) -> dict:
-    """Sum expenses filtered by date range (YYYY-MM-DD) and/or category."""
+    """Sum expenses filtered by date range (YYYY-MM-DD) and/or category.
+    The 'gastos' list is most-recent-first, enumerated to match edit/delete."""
     empty = {"total": 0, "count": 0, "por_categoria": {}, "gastos": []}
     if not user.get("sheets_id"):
         return empty
@@ -541,34 +558,229 @@ async def get_expenses(
             ws = sh.worksheet("Gastos")
         except gspread.WorksheetNotFound:
             return empty
-        records = ws.get_all_records()
-        filtered = []
-        for r in records:
-            f = str(r.get("fecha", "")).strip()
-            if desde and f < desde:
-                continue
-            if hasta and f > hasta:
-                continue
-            if categoria and str(r.get("categoria", "")).lower() != categoria.lower():
-                continue
-            filtered.append(r)
+        rows = _filter_expense_rows(ws.get_all_records(), desde, hasta, categoria)
 
         por_cat: dict[str, float] = {}
         total = 0.0
-        for r in filtered:
+        gastos = []
+        for pos, (_, r) in enumerate(rows, 1):
             m = _parse_monto(r.get("monto"))
             total += m
             cat = str(r.get("categoria", "Otros")).strip() or "Otros"
             por_cat[cat] = por_cat.get(cat, 0.0) + m
+            gastos.append({
+                "n": pos,
+                "fecha": r.get("fecha", ""),
+                "monto": m,
+                "categoria": cat,
+                "descripcion": r.get("descripcion", ""),
+            })
 
         return {
             "total": total,
-            "count": len(filtered),
+            "count": len(rows),
             "por_categoria": por_cat,
-            "gastos": filtered[-15:],
+            "gastos": gastos,
         }
 
     return await loop.run_in_executor(None, _get)
+
+
+async def update_expense_monto(
+    user: dict, posicion: int, nuevo_monto: float,
+    desde: str | None = None, hasta: str | None = None, categoria: str | None = None,
+) -> dict | None:
+    """Update the amount of the Nth expense in the filtered (most-recent-first) list."""
+    if not user.get("sheets_id"):
+        return None
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _update():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Gastos")
+        except gspread.WorksheetNotFound:
+            return None
+        rows = _filter_expense_rows(ws.get_all_records(), desde, hasta, categoria)
+        if posicion < 1 or posicion > len(rows):
+            return None
+        row_idx, r = rows[posicion - 1]
+        ws.update_cell(row_idx, 2, nuevo_monto)  # column 2 = monto
+        return {"descripcion": r.get("descripcion", ""), "monto": nuevo_monto,
+                "categoria": r.get("categoria", "")}
+
+    return await loop.run_in_executor(None, _update)
+
+
+async def delete_expense(
+    user: dict, posicion: int,
+    desde: str | None = None, hasta: str | None = None, categoria: str | None = None,
+) -> dict | None:
+    """Delete the Nth expense in the filtered (most-recent-first) list."""
+    if not user.get("sheets_id"):
+        return None
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _delete():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Gastos")
+        except gspread.WorksheetNotFound:
+            return None
+        rows = _filter_expense_rows(ws.get_all_records(), desde, hasta, categoria)
+        if posicion < 1 or posicion > len(rows):
+            return None
+        row_idx, r = rows[posicion - 1]
+        ws.delete_rows(row_idx)
+        return {"descripcion": r.get("descripcion", ""), "monto": _parse_monto(r.get("monto")),
+                "categoria": r.get("categoria", "")}
+
+    return await loop.run_in_executor(None, _delete)
+
+
+# ── Gastos fijos (recurrentes mensuales) ──────────────────────────────────────
+
+FIXED_HEADERS = ["nombre", "monto", "categoria", "dia_del_mes", "activo", "ultimo_mes_cargado"]
+
+
+def _get_fijos_ws(sh):
+    try:
+        return sh.worksheet("GastosFijos")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="GastosFijos", rows=500, cols=len(FIXED_HEADERS))
+        ws.append_row(FIXED_HEADERS)
+        return ws
+
+
+def _is_active(value) -> bool:
+    return str(value).strip().lower() in ("si", "sí", "true", "1")
+
+
+async def add_fixed_expense(
+    user: dict, nombre: str, monto: float, categoria: str, dia_del_mes: int = 1
+) -> bool:
+    """Add or update a monthly recurring expense (upsert by nombre)."""
+    if not user.get("sheets_id"):
+        return False
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _add():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        ws = _get_fijos_ws(sh)
+        records = ws.get_all_records()
+        for idx, r in enumerate(records):
+            if str(r.get("nombre", "")).strip().lower() == nombre.strip().lower():
+                row = idx + 2
+                ws.update_cell(row, 2, monto)
+                ws.update_cell(row, 3, categoria)
+                ws.update_cell(row, 4, dia_del_mes)
+                ws.update_cell(row, 5, "si")
+                return True
+        ws.append_row([nombre, monto, categoria, dia_del_mes, "si", ""])
+        return True
+
+    return await loop.run_in_executor(None, _add)
+
+
+async def get_fixed_expenses(user: dict, solo_activos: bool = True) -> list[dict]:
+    if not user.get("sheets_id"):
+        return []
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _get():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("GastosFijos")
+        except gspread.WorksheetNotFound:
+            return []
+        records = ws.get_all_records()
+        if solo_activos:
+            records = [r for r in records if _is_active(r.get("activo"))]
+        return records
+
+    return await loop.run_in_executor(None, _get)
+
+
+async def cancel_fixed_expense(user: dict, nombre: str) -> str | None:
+    """Mark a fixed expense inactive by name (case-insensitive substring). Returns its name or None."""
+    if not user.get("sheets_id"):
+        return None
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _cancel():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("GastosFijos")
+        except gspread.WorksheetNotFound:
+            return None
+        records = ws.get_all_records()
+        q = nombre.strip().lower()
+        for idx, r in enumerate(records):
+            n = str(r.get("nombre", "")).strip().lower()
+            if _is_active(r.get("activo")) and q in n:
+                ws.update_cell(idx + 2, 5, "no")  # column 5 = activo
+                return r.get("nombre", nombre)
+        return None
+
+    return await loop.run_in_executor(None, _cancel)
+
+
+async def log_due_fixed_expenses(user: dict, today: datetime) -> list[dict]:
+    """Append any due fixed expenses to Gastos and mark them logged for this month.
+    Returns the list of {nombre, monto, categoria} that were logged."""
+    if not user.get("sheets_id"):
+        return []
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+    current_month = today.strftime("%Y-%m")
+    today_str = today.strftime("%Y-%m-%d")
+
+    def _run():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            fijos_ws = sh.worksheet("GastosFijos")
+        except gspread.WorksheetNotFound:
+            return []
+        records = fijos_ws.get_all_records()
+        gastos_ws = _get_gastos_ws(sh)
+        logged = []
+        for idx, r in enumerate(records):
+            if not _is_active(r.get("activo")):
+                continue
+            if str(r.get("ultimo_mes_cargado", "")).strip() == current_month:
+                continue
+            try:
+                dia = int(r.get("dia_del_mes", 1) or 1)
+            except (ValueError, TypeError):
+                dia = 1
+            if today.day < dia:
+                continue
+            nombre = r.get("nombre", "")
+            monto = r.get("monto", 0)
+            categoria = r.get("categoria", "Otros")
+            gastos_ws.append_row([today_str, monto, categoria, f"{nombre} (fijo)", ""])
+            fijos_ws.update_cell(idx + 2, 6, current_month)  # column 6 = ultimo_mes_cargado
+            logged.append({"nombre": nombre, "monto": monto, "categoria": categoria})
+        return logged
+
+    return await loop.run_in_executor(None, _run)
 
 
 # ── Gmail watch helper ────────────────────────────────────────────────────────

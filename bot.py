@@ -29,18 +29,23 @@ from database import (
 from google_services import (
     GmailPermissionError,
     add_expense,
+    add_fixed_expense,
     add_task,
+    cancel_fixed_expense,
     create_event,
     delete_event,
+    delete_expense,
     delete_task_by_position,
     get_events_by_date,
     get_expenses,
+    get_fixed_expenses,
     get_pending_tasks,
     get_today_events,
     search_emails,
     search_event,
     send_email,
     update_event,
+    update_expense_monto,
     update_task,
     update_task_fecha,
 )
@@ -140,6 +145,25 @@ _EXPENSE_QUERY_PHRASES = (
     "resumen de gastos", "resumen de mis gastos",
     "en qué gasté", "en que gaste", "en qué gaste", "en que gasté",
 )
+_FIXED_QUERY_PHRASES = (
+    "mis gastos fijos", "cuáles son mis gastos fijos", "cuales son mis gastos fijos",
+    "ver gastos fijos", "ver mis gastos fijos", "qué gastos fijos", "que gastos fijos",
+    "lista de gastos fijos", "mostrame los gastos fijos", "mostrame mis gastos fijos",
+    "mis fijos", "cuáles son mis fijos", "cuales son mis fijos",
+)
+_FIXED_ADD_MARKERS = (
+    "gasto fijo", "por mes", "todos los meses", "cada mes",
+    "mensual", "mensualmente", "al mes",
+)
+_FIXED_CANCEL_VERBS = (
+    "cancelá", "cancela", "sacá", "saca", "eliminá", "elimina",
+    "dar de baja", "dá de baja", "da de baja", "borrá", "borra", "quitá", "quita",
+)
+_EXPENSE_DELETE_VERBS = ("borrá", "borra", "eliminá", "elimina", "sacá", "saca", "quitá", "quita")
+_EXPENSE_EDIT_MARKERS = (
+    "cambiá", "cambia", "corregí", "corregi", "actualizá", "actualiza",
+    "modificá", "modifica", "el monto", "poné", "pone", "ponele",
+)
 
 
 def _is_event_delete_intent(text: str) -> bool:
@@ -190,6 +214,39 @@ def _is_expense_add_intent(text: str) -> bool:
     has_verb = any(s in t for s in _EXPENSE_ADD_STEMS)
     has_number = bool(re.search(r"\d", t))
     return has_verb and has_number
+
+
+def _is_expense_delete_intent(text: str) -> bool:
+    t = text.lower()
+    if "fijo" in t:
+        return False
+    has_verb = any(v in t for v in _EXPENSE_DELETE_VERBS)
+    return has_verb and "gasto" in t and bool(re.search(r"\d", t))
+
+
+def _is_expense_edit_intent(text: str) -> bool:
+    t = text.lower()
+    if "fijo" in t:
+        return False
+    has_marker = any(m in t for m in _EXPENSE_EDIT_MARKERS)
+    return has_marker and "gasto" in t and bool(re.search(r"\d", t))
+
+
+def _is_fixed_query_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _FIXED_QUERY_PHRASES)
+
+
+def _is_fixed_cancel_intent(text: str) -> bool:
+    t = text.lower()
+    has_verb = any(v in t for v in _FIXED_CANCEL_VERBS)
+    return has_verb and "fijo" in t
+
+
+def _is_fixed_add_intent(text: str) -> bool:
+    t = text.lower()
+    has_marker = any(m in t for m in _FIXED_ADD_MARKERS)
+    return has_marker and bool(re.search(r"\d", t))
 
 OPENAI_TOOLS = [
     {
@@ -451,7 +508,11 @@ OPENAI_TOOLS = [
                     },
                     "descripcion": {
                         "type": "string",
-                        "description": "Descripción breve de en qué fue el gasto",
+                        "description": (
+                            "Descripción breve del gasto (máx ~6 palabras). Conservá el detalle "
+                            "útil que dé el usuario (ej. 'uber a lo de mi novia'). Si el usuario da "
+                            "una descripción muy larga, resumila a lo esencial."
+                        ),
                     },
                     "fecha": {
                         "type": "string",
@@ -467,10 +528,13 @@ OPENAI_TOOLS = [
         "function": {
             "name": "get_expenses",
             "description": (
-                "Consulta y suma los gastos del usuario en un período y/o categoría. "
-                "Calculá las fechas desde/hasta a partir de hoy si el usuario menciona "
-                "un período relativo (este mes, esta semana, hoy, los últimos 7 días, etc.). "
-                "Para 'este mes' usá desde el día 1 del mes actual hasta hoy."
+                "Consulta y lista los gastos del usuario en un período y/o categoría. "
+                "Devuelve el total, el desglose por categoría y la lista de gastos "
+                "(campo 'gastos', ya ordenada del más reciente al más antiguo, cada uno con su "
+                "número 'n'). Cuando muestres la lista, enumerá los gastos EN EL MISMO ORDEN del "
+                "array, usando el número 'n', con su descripción y monto. "
+                "Calculá las fechas desde/hasta a partir de hoy si el usuario menciona un período "
+                "relativo (este mes, esta semana, hoy, etc.). Para 'este mes' usá desde el día 1."
             ),
             "parameters": {
                 "type": "object",
@@ -484,6 +548,98 @@ OPENAI_TOOLS = [
                     },
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_expense_monto",
+            "description": (
+                "Cambia el monto de un gasto ya registrado, identificándolo por su número en la "
+                "lista. Pasá los MISMOS filtros (categoria/desde/hasta) que se usaron para mostrar "
+                "la lista, para que el número coincida. Si no hay filtros, es la lista general."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "posicion": {"type": "integer", "description": "Número del gasto en la lista mostrada"},
+                    "nuevo_monto": {"type": "number", "description": "Nuevo monto en pesos"},
+                    "categoria": {"type": "string", "enum": EXPENSE_CATEGORIES,
+                                  "description": "Mismo filtro de categoría usado al listar (opcional)"},
+                    "desde": {"type": "string", "description": "Mismo desde usado al listar (opcional)"},
+                    "hasta": {"type": "string", "description": "Mismo hasta usado al listar (opcional)"},
+                },
+                "required": ["posicion", "nuevo_monto"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_expense",
+            "description": (
+                "Elimina un gasto ya registrado, identificándolo por su número en la lista. "
+                "Pasá los MISMOS filtros (categoria/desde/hasta) que se usaron para mostrar la "
+                "lista, para que el número coincida."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "posicion": {"type": "integer", "description": "Número del gasto en la lista mostrada"},
+                    "categoria": {"type": "string", "enum": EXPENSE_CATEGORIES,
+                                  "description": "Mismo filtro de categoría usado al listar (opcional)"},
+                    "desde": {"type": "string", "description": "Mismo desde usado al listar (opcional)"},
+                    "hasta": {"type": "string", "description": "Mismo hasta usado al listar (opcional)"},
+                },
+                "required": ["posicion"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_fixed_expense",
+            "description": (
+                "Registra un gasto fijo mensual (se carga solo cada mes): alquiler, seguro, "
+                "patente, cuota de club, suscripciones, etc. Usalo cuando el usuario declare un "
+                "gasto recurrente ('el alquiler son 200000 por mes', 'agregá gasto fijo: ...'). "
+                "Inferí la categoría. Si dice un día del mes ('el 10'), usalo; si no, 1."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del gasto fijo (ej. Alquiler, Netflix, Seguro auto)"},
+                    "monto": {"type": "number", "description": "Monto mensual en pesos"},
+                    "categoria": {"type": "string", "enum": EXPENSE_CATEGORIES, "description": "Categoría"},
+                    "dia_del_mes": {"type": "integer", "description": "Día del mes en que se paga (1-28, por defecto 1)"},
+                },
+                "required": ["nombre", "monto", "categoria"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fixed_expenses",
+            "description": "Lista los gastos fijos mensuales activos del usuario, enumerados con su monto y día.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_fixed_expense",
+            "description": (
+                "Da de baja un gasto fijo mensual para que deje de cargarse, identificándolo por "
+                "su nombre. Usalo cuando el usuario diga 'cancelá el gasto fijo X', 'dá de baja X', etc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre (o parte) del gasto fijo a cancelar"},
+                },
+                "required": ["nombre"],
             },
         },
     },
@@ -638,6 +794,39 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
             hasta=func_args.get("hasta"),
             categoria=func_args.get("categoria"),
         )
+    if func_name == "update_expense_monto":
+        result = await update_expense_monto(
+            user,
+            func_args["posicion"],
+            func_args["nuevo_monto"],
+            desde=func_args.get("desde"),
+            hasta=func_args.get("hasta"),
+            categoria=func_args.get("categoria"),
+        )
+        return result or {"error": "No se encontró ese gasto."}
+    if func_name == "delete_expense":
+        result = await delete_expense(
+            user,
+            func_args["posicion"],
+            desde=func_args.get("desde"),
+            hasta=func_args.get("hasta"),
+            categoria=func_args.get("categoria"),
+        )
+        return result or {"error": "No se encontró ese gasto."}
+    if func_name == "add_fixed_expense":
+        ok = await add_fixed_expense(
+            user,
+            func_args["nombre"],
+            func_args["monto"],
+            func_args["categoria"],
+            func_args.get("dia_del_mes", 1),
+        )
+        return {"ok": ok, "nombre": func_args["nombre"], "monto": func_args["monto"]}
+    if func_name == "get_fixed_expenses":
+        return await get_fixed_expenses(user)
+    if func_name == "cancel_fixed_expense":
+        nombre = await cancel_fixed_expense(user, func_args["nombre"])
+        return {"ok": nombre is not None, "nombre": nombre}
     return {"error": f"Función desconocida: {func_name}"}
 
 
@@ -673,20 +862,39 @@ async def _call_openai(
             "usá update_task con su número de posición en la lista."
             "\n\nREGLA PARA GASTOS: "
             "Si el usuario dice que YA gastó/pagó/compró algo (verbo en pasado, con un monto), "
-            "registralo con add_expense e inferí la categoría. "
-            "Si pide ver o sumar sus gastos, usá get_expenses calculando las fechas del período. "
+            "registralo con add_expense e inferí la categoría, y guardá una descripción breve. "
+            "Si pide ver o listar sus gastos, usá get_expenses y mostralos enumerados con su número, "
+            "descripción y monto. Para editar el monto de un gasto usá update_expense_monto y para "
+            "borrarlo delete_expense, identificándolo por su número en la lista mostrada (pasá los "
+            "mismos filtros de categoría/fechas). "
             "OJO: 'pagar el monotributo' o 'tengo que pagar X' es una TAREA futura, no un gasto. "
-            "Solo es gasto si ya ocurrió ('pagué', 'gasté', 'compré')."
-            f"\nCategorías de gasto válidas: {', '.join(EXPENSE_CATEGORIES)}."
+            "Solo es gasto si ya ocurrió ('pagué', 'gasté', 'compré'). "
+            "\n\nREGLA PARA GASTOS FIJOS: "
+            "Un gasto fijo es uno que se repite todos los meses (alquiler, seguro, patente, cuota "
+            "de club, Netflix, etc.). Cuando el usuario lo declare ('el alquiler son 200000 por mes'), "
+            "registralo con add_fixed_expense. Para verlos usá get_fixed_expenses y para darlos de "
+            "baja cancel_fixed_expense. Los gastos fijos se cargan solos como gasto cada mes."
+            f"\nCategorías válidas: {', '.join(EXPENSE_CATEGORIES)}."
         ),
     }
 
     # Build messages: system + history + current
     messages = [system_msg] + _get_history(chat_id) + [{"role": "user", "content": text}]
 
-    # Force specific tools when intent is clear — gpt-4o-mini hallucinates otherwise
-    if _is_event_delete_intent(text):
-        tool_choice: str | dict = {"type": "function", "function": {"name": "delete_event"}}
+    # Force specific tools when intent is clear — gpt-4o-mini hallucinates otherwise.
+    # Order matters: most specific first (fixed/expense edits before generic delete/edit).
+    if _is_fixed_query_intent(text):
+        tool_choice: str | dict = {"type": "function", "function": {"name": "get_fixed_expenses"}}
+    elif _is_fixed_cancel_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "cancel_fixed_expense"}}
+    elif _is_fixed_add_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_fixed_expense"}}
+    elif _is_expense_delete_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "delete_expense"}}
+    elif _is_expense_edit_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "update_expense_monto"}}
+    elif _is_event_delete_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "delete_event"}}
     elif _is_task_edit_intent(text):
         tool_choice = {"type": "function", "function": {"name": "update_task"}}
     elif _is_event_edit_intent(text):
