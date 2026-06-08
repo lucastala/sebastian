@@ -144,10 +144,11 @@ def _is_watch_email_intent(text: str) -> bool:
     t = text.lower()
     if any(p in t for p in _WATCH_EMAIL_PHRASES):
         return True
-    # "avisame/notificame" + "mail/correo" en el mismo mensaje
     has_notify = any(w in t for w in ("avisame", "avísame", "notificame", "notifícame"))
     has_mail = any(w in t for w in ("mail", "correo", "email"))
-    return has_notify and has_mail
+    # dirección de email presente (tiene @)
+    has_at = "@" in t
+    return has_notify and (has_mail or has_at)
 
 
 def _is_unwatch_email_intent(text: str) -> bool:
@@ -580,6 +581,7 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "unwatch_email"}}
     else:
         tool_choice = "auto"
+    logger.info(f"tool_choice={tool_choice!r} for: {text[:60]!r}")
 
     response = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
