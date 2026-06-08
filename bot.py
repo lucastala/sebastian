@@ -100,6 +100,20 @@ _EDIT_TASK_PHRASES = ("cambiá la tarea", "cambia la tarea", "editá la tarea", 
 _EDIT_EVENT_STEMS = ("cambiá el evento", "cambia el evento", "editá el evento", "edita el evento",
                      "cambiá la reunión", "cambia la reunión", "cambiá la hora", "cambia la hora",
                      "pasá el evento", "mové el evento", "cambiá el turno", "cambia el turno")
+_WATCH_EMAIL_PHRASES = (
+    "avisame cuando", "avísame cuando", "avisame si", "avísame si",
+    "notificame cuando", "notifícame cuando", "notificame si", "notifícame si",
+    "vigilá los mails", "vigila los mails", "vigilá el mail", "vigila el mail",
+    "vigilá los correos", "vigila los correos",
+    "cuando me llegue un mail", "cuando llegue un mail",
+    "cuando me escriba", "si me escribe",
+)
+_UNWATCH_EMAIL_PHRASES = (
+    "dejá de vigilar", "deja de vigilar",
+    "ya no me avises", "dejá de avisarme",
+    "sacá la vigilancia", "saca la vigilancia",
+    "stop vigilar",
+)
 
 
 def _is_event_delete_intent(text: str) -> bool:
@@ -122,6 +136,16 @@ def _is_task_edit_intent(text: str) -> bool:
 def _is_event_edit_intent(text: str) -> bool:
     t = text.lower()
     return any(p in t for p in _EDIT_EVENT_STEMS)
+
+
+def _is_watch_email_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _WATCH_EMAIL_PHRASES)
+
+
+def _is_unwatch_email_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _UNWATCH_EMAIL_PHRASES)
 
 OPENAI_TOOLS = [
     {
@@ -543,6 +567,10 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "update_task"}}
     elif _is_event_edit_intent(text):
         tool_choice = {"type": "function", "function": {"name": "update_event"}}
+    elif _is_watch_email_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "watch_email"}}
+    elif _is_unwatch_email_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "unwatch_email"}}
     else:
         tool_choice = "auto"
 
