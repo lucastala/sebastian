@@ -17,6 +17,15 @@ CREATE TABLE IF NOT EXISTS public.usuarios (
 CREATE INDEX IF NOT EXISTS idx_usuarios_estado
     ON public.usuarios (estado_suscripcion);
 
+-- Email watches table
+CREATE TABLE IF NOT EXISTS public.email_watches (
+    id            BIGSERIAL    PRIMARY KEY,
+    chat_id       BIGINT       NOT NULL REFERENCES public.usuarios(chat_id) ON DELETE CASCADE,
+    email_address TEXT         NOT NULL,
+    last_checked  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE(chat_id, email_address)
+);
+
 -- Enable Row Level Security
 ALTER TABLE public.usuarios ENABLE ROW LEVEL SECURITY;
 

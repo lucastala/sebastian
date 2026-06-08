@@ -92,3 +92,56 @@ async def get_active_users() -> list[dict]:
     except Exception as e:
         logger.error(f"Error fetching active users: {e}")
         return []
+
+
+# ── Email watches ─────────────────────────────────────────────────────────────
+
+async def get_email_watches(chat_id: int) -> list[dict]:
+    try:
+        result = get_supabase().table("email_watches").select("*").eq("chat_id", chat_id).execute()
+        return result.data or []
+    except Exception as e:
+        logger.error(f"Error getting email watches for {chat_id}: {e}")
+        return []
+
+
+async def add_email_watch(chat_id: int, email_address: str) -> bool:
+    try:
+        get_supabase().table("email_watches").upsert({
+            "chat_id": chat_id,
+            "email_address": email_address.lower().strip(),
+            "last_checked": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding email watch: {e}")
+        return False
+
+
+async def remove_email_watch(chat_id: int, email_address: str) -> bool:
+    try:
+        get_supabase().table("email_watches").delete().eq(
+            "chat_id", chat_id
+        ).eq("email_address", email_address.lower().strip()).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error removing email watch: {e}")
+        return False
+
+
+async def get_all_email_watches() -> list[dict]:
+    try:
+        result = get_supabase().table("email_watches").select("*").execute()
+        return result.data or []
+    except Exception as e:
+        logger.error(f"Error getting all email watches: {e}")
+        return []
+
+
+async def update_watch_last_checked(chat_id: int, email_address: str, timestamp: datetime) -> None:
+    try:
+        get_supabase().table("email_watches").update({
+            "last_checked": timestamp.isoformat(),
+        }).eq("chat_id", chat_id).eq("email_address", email_address).execute()
+    except Exception as e:
+        logger.error(f"Error updating watch last_checked: {e}")

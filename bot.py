@@ -18,8 +18,16 @@ from telegram.ext import (
     filters,
 )
 
-from database import create_user, get_user
+from database import (
+    add_email_watch,
+    create_user,
+    get_active_users,
+    get_email_watches,
+    get_user,
+    remove_email_watch,
+)
 from google_services import (
+    GmailPermissionError,
     add_task,
     create_event,
     delete_event,
@@ -27,7 +35,9 @@ from google_services import (
     get_events_by_date,
     get_pending_tasks,
     get_today_events,
+    search_emails,
     search_event,
+    send_email,
     update_event,
     update_task,
     update_task_fecha,
@@ -276,6 +286,39 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_emails",
+            "description": "Busca emails en Gmail por remitente, asunto o palabras clave.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Búsqueda de Gmail. Ej: 'from:banco@example.com', 'factura', 'subject:reunión'",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Redacta y envía un email desde la cuenta Gmail del usuario.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Dirección de destino"},
+                    "subject": {"type": "string", "description": "Asunto del email"},
+                    "body": {"type": "string", "description": "Cuerpo del email"},
+                },
+                "required": ["to", "subject", "body"],
+            },
+        },
+    },
 ]
 
 
@@ -399,6 +442,11 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
             nuevo_nombre=func_args.get("nuevo_nombre"),
             nueva_fecha=func_args.get("nueva_fecha"),
         )
+        return {"ok": ok}
+    if func_name == "search_emails":
+        return await search_emails(user, func_args["query"])
+    if func_name == "send_email":
+        ok = await send_email(user, func_args["to"], func_args["subject"], func_args["body"])
         return {"ok": ok}
     return {"error": f"Función desconocida: {func_name}"}
 
@@ -648,6 +696,9 @@ async def _route_text(
     # OpenAI function calling
     try:
         reply, keyboard = await _call_openai(user, text)
+    except GmailPermissionError:
+        reply = _gmail_reauth_text(user["chat_id"])
+        keyboard = None
     except Exception as e:
         logger.error(f"OpenAI error for user {user['chat_id']}: {e}")
         reply, keyboard = "⚠️ Tuve un error procesando tu mensaje. Intentá de nuevo.", None
@@ -713,6 +764,89 @@ async def handle_delete_event(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Error deleting event {event_id}: {e}")
         await query.edit_message_text("⚠️ No se pudo eliminar el evento.")
+
+
+# ── Gmail re-auth helper ──────────────────────────────────────────────────────
+
+def _gmail_reauth_text(chat_id: int) -> str:
+    return (
+        "⚠️ Tu cuenta no tiene permisos de Gmail todavía. "
+        "Necesitás reautorizar para activar esta función:\n\n"
+        f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+    )
+
+
+# ── /vigilar command ──────────────────────────────────────────────────────────
+
+async def vigilar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user or not user.get("access_token"):
+        await update.message.reply_text("⚠️ Primero necesitás conectar tu cuenta de Google.")
+        return
+
+    if not context.args:
+        watches = await get_email_watches(chat_id)
+        if not watches:
+            await update.message.reply_text(
+                "No estás vigilando ningún email.\n\nUsá: /vigilar email@ejemplo.com"
+            )
+        else:
+            lines = ["📧 *Emails vigilados:*"]
+            for w in watches:
+                lines.append(f"• {w['email_address']}")
+            lines.append("\nUsá /vigilar\\_stop email@ejemplo.com para dejar de vigilar.")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    email_address = context.args[0].lower().strip()
+    ok = await add_email_watch(chat_id, email_address)
+    if ok:
+        await update.message.reply_text(
+            f"✅ Voy a avisarte cuando llegue un mail de *{email_address}*.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text("⚠️ No se pudo guardar. Intentá de nuevo.")
+
+
+async def vigilar_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if not context.args:
+        await update.message.reply_text("Usá: /vigilar_stop email@ejemplo.com")
+        return
+    email_address = context.args[0].lower().strip()
+    await remove_email_watch(chat_id, email_address)
+    await update.message.reply_text(
+        f"✅ Dejé de vigilar *{email_address}*.", parse_mode="Markdown"
+    )
+
+
+# ── /broadcast command (admin only) ──────────────────────────────────────────
+
+ADMIN_CHAT_ID = int(os.getenv("DAILY_SUMMARY_CHAT_ID", "0"))
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if chat_id != ADMIN_CHAT_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usá: /broadcast <mensaje>")
+        return
+
+    text = " ".join(context.args)
+    users = await get_active_users()
+    sent, failed = 0, 0
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=u["chat_id"], text=text)
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await update.message.reply_text(f"✅ Enviado a {sent} usuarios. Fallidos: {failed}.")
 
 
 # ── Main handlers ─────────────────────────────────────────────────────────────
@@ -829,6 +963,9 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("vigilar", vigilar_command))
+    app.add_handler(CommandHandler("vigilar_stop", vigilar_stop_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
     app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
     app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))

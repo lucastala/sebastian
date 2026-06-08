@@ -1,8 +1,10 @@
+import base64
 import os
 import asyncio
 import calendar as cal_module
 import logging
 from datetime import datetime, timedelta, timezone
+from email.mime.text import MIMEText
 from typing import Optional
 
 import gspread
@@ -10,6 +12,11 @@ from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+
+class GmailPermissionError(Exception):
+    pass
 
 load_dotenv()
 
@@ -23,6 +30,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
 ]
 
 
@@ -393,3 +402,95 @@ async def create_event(
         }
 
     return await loop.run_in_executor(None, _create)
+
+
+# ── Gmail ─────────────────────────────────────────────────────────────────────
+
+def _parse_email_headers(msg_data: dict) -> dict:
+    headers = {h["name"]: h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
+    return {
+        "id": msg_data["id"],
+        "asunto": headers.get("Subject", "(Sin asunto)"),
+        "remitente": headers.get("From", ""),
+        "fecha": headers.get("Date", ""),
+        "snippet": msg_data.get("snippet", ""),
+    }
+
+
+async def search_emails(user: dict, query: str, max_results: int = 5) -> list[dict]:
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _search():
+        try:
+            service = build("gmail", "v1", credentials=creds)
+            result = service.users().messages().list(
+                userId="me", q=query, maxResults=max_results
+            ).execute()
+            messages = result.get("messages", [])
+            emails = []
+            for msg in messages:
+                msg_data = service.users().messages().get(
+                    userId="me", id=msg["id"], format="metadata",
+                    metadataHeaders=["Subject", "From", "Date"],
+                ).execute()
+                emails.append(_parse_email_headers(msg_data))
+            return emails
+        except HttpError as e:
+            if e.resp.status == 403:
+                raise GmailPermissionError()
+            raise
+
+    return await loop.run_in_executor(None, _search)
+
+
+async def send_email(user: dict, to: str, subject: str, body: str) -> bool:
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _send():
+        try:
+            service = build("gmail", "v1", credentials=creds)
+            msg = MIMEText(body)
+            msg["to"] = to
+            msg["subject"] = subject
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            service.users().messages().send(userId="me", body={"raw": raw}).execute()
+            return True
+        except HttpError as e:
+            if e.resp.status == 403:
+                raise GmailPermissionError()
+            raise
+
+    return await loop.run_in_executor(None, _send)
+
+
+async def get_emails_from_since(user: dict, email_address: str, since: datetime) -> list[dict]:
+    """Get new emails from a specific address since a given timestamp."""
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+    since_ts = int(since.timestamp())
+
+    def _get():
+        try:
+            service = build("gmail", "v1", credentials=creds)
+            result = service.users().messages().list(
+                userId="me",
+                q=f"from:{email_address} after:{since_ts}",
+                maxResults=10,
+            ).execute()
+            messages = result.get("messages", [])
+            emails = []
+            for msg in messages:
+                msg_data = service.users().messages().get(
+                    userId="me", id=msg["id"], format="metadata",
+                    metadataHeaders=["Subject", "From", "Date"],
+                ).execute()
+                emails.append(_parse_email_headers(msg_data))
+            return emails
+        except HttpError as e:
+            if e.resp.status == 403:
+                raise GmailPermissionError()
+            raise
+
+    return await loop.run_in_executor(None, _get)
