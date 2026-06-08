@@ -248,6 +248,35 @@ def _is_fixed_add_intent(text: str) -> bool:
     has_marker = any(m in t for m in _FIXED_ADD_MARKERS)
     return has_marker and bool(re.search(r"\d", t))
 
+
+# Pronoun-based deletes ("eliminalo", "borrá eso") depend on conversation context,
+# not keywords — resolve them by looking at what was just discussed.
+_PRONOUN_DELETE_FORMS = (
+    "eliminalo", "eliminala", "eliminalos", "eliminalas",
+    "borralo", "borrala", "borralos", "borralas",
+    "sacalo", "sacala", "sacalos", "sacalas",
+    "quitalo", "quitala", "quitalos", "quitalas",
+    "eliminá eso", "elimina eso", "eliminá ese", "elimina ese",
+    "borrá eso", "borra eso", "borrá ese", "borra ese",
+    "sacá eso", "saca eso",
+)
+
+
+def _is_pronoun_delete(text: str) -> bool:
+    t = text.lower()
+    return any(f in t for f in _PRONOUN_DELETE_FORMS)
+
+
+def _last_topic(chat_id: int) -> str | None:
+    """Infer whether recent conversation was about an expense or an event."""
+    for msg in reversed(_get_history(chat_id)):
+        c = str(msg.get("content", "")).lower()
+        if "gasto" in c:
+            return "expense"
+        if "evento" in c or "reunión" in c or "reunion" in c or "turno" in c:
+            return "event"
+    return None
+
 OPENAI_TOOLS = [
     {
         "type": "function",
@@ -883,8 +912,18 @@ async def _call_openai(
 
     # Force specific tools when intent is clear — gpt-4o-mini hallucinates otherwise.
     # Order matters: most specific first (fixed/expense edits before generic delete/edit).
-    if _is_fixed_query_intent(text):
-        tool_choice: str | dict = {"type": "function", "function": {"name": "get_fixed_expenses"}}
+    tool_choice: str | dict
+    if _is_pronoun_delete(text):
+        # "eliminalo" / "borrá eso" — resolve by what was just discussed
+        topic = _last_topic(chat_id)
+        if topic == "expense":
+            tool_choice = {"type": "function", "function": {"name": "delete_expense"}}
+        elif topic == "event":
+            tool_choice = {"type": "function", "function": {"name": "delete_event"}}
+        else:
+            tool_choice = "auto"
+    elif _is_fixed_query_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "get_fixed_expenses"}}
     elif _is_fixed_cancel_intent(text):
         tool_choice = {"type": "function", "function": {"name": "cancel_fixed_expense"}}
     elif _is_fixed_add_intent(text):
