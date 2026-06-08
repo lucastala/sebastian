@@ -102,7 +102,9 @@ _EDIT_EVENT_STEMS = ("cambiá el evento", "cambia el evento", "editá el evento"
                      "pasá el evento", "mové el evento", "cambiá el turno", "cambia el turno")
 _WATCH_EMAIL_PHRASES = (
     "avisame cuando", "avísame cuando", "avisame si", "avísame si",
+    "avisame cada vez", "avísame cada vez",
     "notificame cuando", "notifícame cuando", "notificame si", "notifícame si",
+    "notificame cada vez", "notifícame cada vez",
     "vigilá los mails", "vigila los mails", "vigilá el mail", "vigila el mail",
     "vigilá los correos", "vigila los correos",
     "cuando me llegue un mail", "cuando llegue un mail",
@@ -140,7 +142,12 @@ def _is_event_edit_intent(text: str) -> bool:
 
 def _is_watch_email_intent(text: str) -> bool:
     t = text.lower()
-    return any(p in t for p in _WATCH_EMAIL_PHRASES)
+    if any(p in t for p in _WATCH_EMAIL_PHRASES):
+        return True
+    # "avisame/notificame" + "mail/correo" en el mismo mensaje
+    has_notify = any(w in t for w in ("avisame", "avísame", "notificame", "notifícame"))
+    has_mail = any(w in t for w in ("mail", "correo", "email"))
+    return has_notify and has_mail
 
 
 def _is_unwatch_email_intent(text: str) -> bool:
