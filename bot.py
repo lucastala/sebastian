@@ -28,11 +28,13 @@ from database import (
 )
 from google_services import (
     GmailPermissionError,
+    add_expense,
     add_task,
     create_event,
     delete_event,
     delete_task_by_position,
     get_events_by_date,
+    get_expenses,
     get_pending_tasks,
     get_today_events,
     search_emails,
@@ -60,6 +62,16 @@ ARGENTINA_TZ = timezone(timedelta(hours=-3))
 DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 MESES_ES = ["", "ene", "feb", "mar", "abr", "may", "jun",
             "jul", "ago", "sep", "oct", "nov", "dic"]
+
+EXPENSE_CATEGORIES = [
+    "Supermercado", "Restaurantes y delivery", "Transporte", "Vivienda",
+    "Salud", "Ropa y calzado", "Suscripciones", "Entretenimiento", "Trabajo", "Otros",
+]
+CATEGORIA_EMOJI = {
+    "Supermercado": "🛒", "Restaurantes y delivery": "🍕", "Transporte": "⛽",
+    "Vivienda": "🏠", "Salud": "💊", "Ropa y calzado": "👕", "Suscripciones": "📱",
+    "Entretenimiento": "🎉", "Trabajo": "💼", "Otros": "📦",
+}
 
 # Conversation memory — last N exchanges per user (in-memory, resets on restart)
 _conversation_history: dict[int, list[dict]] = {}
@@ -116,6 +128,18 @@ _UNWATCH_EMAIL_PHRASES = (
     "sacá la vigilancia", "saca la vigilancia",
     "stop vigilar",
 )
+_EXPENSE_ADD_STEMS = (
+    "gasté", "gaste", "pagué", "pague", "compré", "compre",
+    "me salió", "me salio", "me costó", "me costo", "gasto de",
+)
+_EXPENSE_QUERY_PHRASES = (
+    "cuánto gasté", "cuanto gaste", "cuánto gaste", "cuanto gasté",
+    "cuánto llevo", "cuanto llevo", "cuánto gasto", "cuanto gasto",
+    "mis gastos", "ver gastos", "ver mis gastos",
+    "mostrame los gastos", "mostrame mis gastos", "mostrá mis gastos",
+    "resumen de gastos", "resumen de mis gastos",
+    "en qué gasté", "en que gaste", "en qué gaste", "en que gasté",
+)
 
 
 def _is_event_delete_intent(text: str) -> bool:
@@ -154,6 +178,18 @@ def _is_watch_email_intent(text: str) -> bool:
 def _is_unwatch_email_intent(text: str) -> bool:
     t = text.lower()
     return any(p in t for p in _UNWATCH_EMAIL_PHRASES)
+
+
+def _is_expense_query_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _EXPENSE_QUERY_PHRASES)
+
+
+def _is_expense_add_intent(text: str) -> bool:
+    t = text.lower()
+    has_verb = any(s in t for s in _EXPENSE_ADD_STEMS)
+    has_number = bool(re.search(r"\d", t))
+    return has_verb and has_number
 
 OPENAI_TOOLS = [
     {
@@ -394,6 +430,63 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_expense",
+            "description": (
+                "Registra un gasto del usuario. Usá esta función cuando el usuario diga "
+                "que gastó, pagó, compró o le costó algo de dinero (verbos en pasado). "
+                "Inferí la categoría más apropiada según la descripción. "
+                "Si menciona 'el lunes', 'ayer', etc., calculá la fecha; si no, usá hoy."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "monto": {"type": "number", "description": "Monto del gasto en pesos (solo el número)"},
+                    "categoria": {
+                        "type": "string",
+                        "enum": EXPENSE_CATEGORIES,
+                        "description": "Categoría del gasto",
+                    },
+                    "descripcion": {
+                        "type": "string",
+                        "description": "Descripción breve de en qué fue el gasto",
+                    },
+                    "fecha": {
+                        "type": "string",
+                        "description": "Fecha en formato YYYY-MM-DD (opcional, por defecto hoy)",
+                    },
+                },
+                "required": ["monto", "categoria"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_expenses",
+            "description": (
+                "Consulta y suma los gastos del usuario en un período y/o categoría. "
+                "Calculá las fechas desde/hasta a partir de hoy si el usuario menciona "
+                "un período relativo (este mes, esta semana, hoy, los últimos 7 días, etc.). "
+                "Para 'este mes' usá desde el día 1 del mes actual hasta hoy."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "desde": {"type": "string", "description": "Fecha inicio YYYY-MM-DD (opcional)"},
+                    "hasta": {"type": "string", "description": "Fecha fin YYYY-MM-DD (opcional)"},
+                    "categoria": {
+                        "type": "string",
+                        "enum": EXPENSE_CATEGORIES,
+                        "description": "Filtrar por una categoría (opcional)",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -529,6 +622,22 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
     if func_name == "unwatch_email":
         ok = await remove_email_watch(user["chat_id"], func_args["email_address"])
         return {"ok": ok, "email": func_args["email_address"]}
+    if func_name == "add_expense":
+        ok = await add_expense(
+            user,
+            func_args["monto"],
+            func_args["categoria"],
+            func_args.get("descripcion", ""),
+            func_args.get("fecha"),
+        )
+        return {"ok": ok, "monto": func_args["monto"], "categoria": func_args["categoria"]}
+    if func_name == "get_expenses":
+        return await get_expenses(
+            user,
+            desde=func_args.get("desde"),
+            hasta=func_args.get("hasta"),
+            categoria=func_args.get("categoria"),
+        )
     return {"error": f"Función desconocida: {func_name}"}
 
 
@@ -562,6 +671,13 @@ async def _call_openai(
             "\n\nREGLA PARA EDITAR TAREAS: "
             "Cuando el usuario quiera renombrar o cambiar la fecha de una tarea, "
             "usá update_task con su número de posición en la lista."
+            "\n\nREGLA PARA GASTOS: "
+            "Si el usuario dice que YA gastó/pagó/compró algo (verbo en pasado, con un monto), "
+            "registralo con add_expense e inferí la categoría. "
+            "Si pide ver o sumar sus gastos, usá get_expenses calculando las fechas del período. "
+            "OJO: 'pagar el monotributo' o 'tengo que pagar X' es una TAREA futura, no un gasto. "
+            "Solo es gasto si ya ocurrió ('pagué', 'gasté', 'compré')."
+            f"\nCategorías de gasto válidas: {', '.join(EXPENSE_CATEGORIES)}."
         ),
     }
 
@@ -579,6 +695,10 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "watch_email"}}
     elif _is_unwatch_email_intent(text):
         tool_choice = {"type": "function", "function": {"name": "unwatch_email"}}
+    elif _is_expense_query_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "get_expenses"}}
+    elif _is_expense_add_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_expense"}}
     else:
         tool_choice = "auto"
     logger.info(f"tool_choice={tool_choice!r} for: {text[:60]!r}")

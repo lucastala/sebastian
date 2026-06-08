@@ -465,6 +465,114 @@ async def send_email(user: dict, to: str, subject: str, body: str) -> bool:
     return await loop.run_in_executor(None, _send)
 
 
+# ── Gastos ────────────────────────────────────────────────────────────────────
+
+EXPENSE_HEADERS = ["fecha", "monto", "categoria", "descripcion", "medio_pago"]
+
+
+def _parse_monto(value) -> float:
+    """Parse a money value, tolerating Argentine formatting (1.500,50)."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        s = str(value).replace("$", "").replace(" ", "").strip()
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        elif "," in s:
+            s = s.replace(",", ".")
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _get_gastos_ws(sh):
+    """Return the Gastos worksheet, creating it with headers if missing."""
+    try:
+        return sh.worksheet("Gastos")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Gastos", rows=2000, cols=len(EXPENSE_HEADERS))
+        ws.append_row(EXPENSE_HEADERS)
+        return ws
+
+
+async def add_expense(
+    user: dict,
+    monto: float,
+    categoria: str,
+    descripcion: str = "",
+    fecha: str | None = None,
+    medio_pago: str | None = None,
+) -> bool:
+    if not user.get("sheets_id"):
+        return False
+
+    creds = await refresh_user_credentials(user)
+    fecha = fecha or datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+    loop = asyncio.get_running_loop()
+
+    def _add():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        ws = _get_gastos_ws(sh)
+        ws.append_row([fecha, monto, categoria, descripcion, medio_pago or ""])
+        return True
+
+    return await loop.run_in_executor(None, _add)
+
+
+async def get_expenses(
+    user: dict,
+    desde: str | None = None,
+    hasta: str | None = None,
+    categoria: str | None = None,
+) -> dict:
+    """Sum expenses filtered by date range (YYYY-MM-DD) and/or category."""
+    empty = {"total": 0, "count": 0, "por_categoria": {}, "gastos": []}
+    if not user.get("sheets_id"):
+        return empty
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _get():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Gastos")
+        except gspread.WorksheetNotFound:
+            return empty
+        records = ws.get_all_records()
+        filtered = []
+        for r in records:
+            f = str(r.get("fecha", "")).strip()
+            if desde and f < desde:
+                continue
+            if hasta and f > hasta:
+                continue
+            if categoria and str(r.get("categoria", "")).lower() != categoria.lower():
+                continue
+            filtered.append(r)
+
+        por_cat: dict[str, float] = {}
+        total = 0.0
+        for r in filtered:
+            m = _parse_monto(r.get("monto"))
+            total += m
+            cat = str(r.get("categoria", "Otros")).strip() or "Otros"
+            por_cat[cat] = por_cat.get(cat, 0.0) + m
+
+        return {
+            "total": total,
+            "count": len(filtered),
+            "por_categoria": por_cat,
+            "gastos": filtered[-15:],
+        }
+
+    return await loop.run_in_executor(None, _get)
+
+
+# ── Gmail watch helper ────────────────────────────────────────────────────────
+
 async def get_emails_from_since(user: dict, email_address: str, since: datetime) -> list[dict]:
     """Get new emails from a specific address since a given timestamp."""
     creds = await refresh_user_credentials(user)
