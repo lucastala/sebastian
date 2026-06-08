@@ -910,10 +910,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "• .número → eliminar tarea por número\n"
             "• 'qué tengo hoy' → ver eventos del día\n"
             "• 'crear reunión el viernes a las 10' → agregar evento\n"
-            "• Audio de voz 🎤 → lo transcribo y proceso"
+            "• Audio de voz 🎤 → lo transcribo y proceso\n\n"
+            "Para reconectar tu cuenta de Google usá /reconectar"
         )
     else:
         await _start_onboarding(update)
+
+
+async def reconectar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    nombre = update.effective_user.first_name or "Usuario"
+    if not await get_user(chat_id):
+        await create_user(chat_id, nombre)
+    oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+    await update.message.reply_text(
+        f"🔗 Hacé clic aquí para reconectar tu cuenta de Google:\n{oauth_url}\n\n"
+        "Tus tareas y datos no se van a borrar."
+    )
 
 
 async def _start_onboarding(update: Update) -> None:
@@ -963,6 +976,7 @@ def main() -> None:
     )
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("reconectar", reconectar_command))
     app.add_handler(CommandHandler("vigilar", vigilar_command))
     app.add_handler(CommandHandler("vigilar_stop", vigilar_stop_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
