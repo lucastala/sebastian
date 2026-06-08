@@ -751,7 +751,7 @@ async def build_tasks_footer(user: dict) -> str:
         return "⚠️ No se pudieron cargar las tareas pendientes."
 
     if not tasks:
-        return "No tenés tareas pendientes.\n\nUsá .texto para agregar tarea."
+        return "No tiene tareas pendientes.\n\nUse .texto para agregar una tarea."
 
     lines = ["📋 *Tareas pendientes:*"]
     for i, task in enumerate(_sort_tasks(tasks), 1):
@@ -760,7 +760,7 @@ async def build_tasks_footer(user: dict) -> str:
             lines.append(f"{i}. *{_format_fecha(fecha)}* — {task['tarea']}")
         else:
             lines.append(f"{i}. {task['tarea']}")
-    lines.append("\nUsá .texto para agregar tarea. Usá .número para eliminar.")
+    lines.append("\nUse .texto para agregar una tarea. Use .número para eliminar.")
     return "\n".join(lines)
 
 
@@ -872,7 +872,10 @@ async def _call_openai(
         "content": (
             "Sos un asistente personal de productividad. "
             "Ayudás a gestionar tareas y eventos de Google Calendar. "
-            "Respondé en español rioplatense, de forma concisa y amigable. "
+            "Dirigite al usuario SIEMPRE de USTED (nunca de vos ni de tú): "
+            "usá 'usted', 'tiene', 'puede', 'avíseme', 'su cuenta', etc. "
+            "Mantené un tono cordial y profesional, claro y conciso, sin ser acartonado. "
+            "El usuario puede escribirte de vos, pero vos siempre respondé de usted. "
             f"La fecha de hoy es {today} ({dia_semana}). "
             "Si el usuario menciona días relativos (mañana, el lunes, el próximo sábado, etc.), "
             "calculá la fecha exacta a partir de hoy usando el día de la semana indicado. "
@@ -1118,7 +1121,7 @@ async def _route_text(
             prefix = (
                 f"✅ Eliminada: *{deleted_name}*\n\n"
                 if deleted_name is not None
-                else f"⚠️ No encontré la tarea #{pos}.\n\n"
+                else f"⚠️ No encontré la tarea n.° {pos}.\n\n"
             )
             footer = await build_tasks_footer(user)
             await message.reply_text(prefix + footer, parse_mode="Markdown")
@@ -1136,12 +1139,12 @@ async def _route_text(
             else:
                 await message.reply_text(
                     "⚠️ No se pudo agregar la tarea. "
-                    "Completá la configuración de Google primero."
+                    "Complete primero la configuración de Google."
                 )
         else:
             footer = await build_tasks_footer(user)
             await message.reply_text(
-                "⚠️ Usá .texto para agregar o .número para eliminar.\n\n" + footer,
+                "⚠️ Use .texto para agregar o .número para eliminar.\n\n" + footer,
                 parse_mode="Markdown",
             )
         return
@@ -1154,7 +1157,7 @@ async def _route_text(
         keyboard = None
     except Exception as e:
         logger.error(f"OpenAI error for user {user['chat_id']}: {e}")
-        reply, keyboard = "⚠️ Tuve un error procesando tu mensaje. Intentá de nuevo.", None
+        reply, keyboard = "⚠️ Tuve un error procesando su mensaje. Intente de nuevo.", None
 
     footer = await build_tasks_footer(user)
     try:
@@ -1226,8 +1229,8 @@ async def handle_delete_event(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 def _gmail_reauth_text(chat_id: int) -> str:
     return (
-        "⚠️ Tu cuenta no tiene permisos de Gmail todavía. "
-        "Necesitás reautorizar para activar esta función:\n\n"
+        "⚠️ Su cuenta todavía no tiene permisos de Gmail. "
+        "Necesita reautorizar para activar esta función:\n\n"
         f"{BASE_URL}/oauth/start?chat_id={chat_id}"
     )
 
@@ -1238,20 +1241,20 @@ async def vigilar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = update.effective_chat.id
     user = await get_user(chat_id)
     if not user or not user.get("access_token"):
-        await update.message.reply_text("⚠️ Primero necesitás conectar tu cuenta de Google.")
+        await update.message.reply_text("⚠️ Primero necesita conectar su cuenta de Google.")
         return
 
     if not context.args:
         watches = await get_email_watches(chat_id)
         if not watches:
             await update.message.reply_text(
-                "No estás vigilando ningún email.\n\nUsá: /vigilar email@ejemplo.com"
+                "No está vigilando ningún correo.\n\nUse: /vigilar correo@ejemplo.com"
             )
         else:
-            lines = ["📧 *Emails vigilados:*"]
+            lines = ["📧 *Correos vigilados:*"]
             for w in watches:
                 lines.append(f"• {w['email_address']}")
-            lines.append("\nUsá /vigilar\\_stop email@ejemplo.com para dejar de vigilar.")
+            lines.append("\nUse /vigilar\\_stop correo@ejemplo.com para dejar de vigilar.")
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         return
 
@@ -1259,17 +1262,17 @@ async def vigilar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ok = await add_email_watch(chat_id, email_address)
     if ok:
         await update.message.reply_text(
-            f"✅ Voy a avisarte cuando llegue un mail de *{email_address}*.",
+            f"✅ Le avisaré cuando llegue un correo de *{email_address}*.",
             parse_mode="Markdown",
         )
     else:
-        await update.message.reply_text("⚠️ No se pudo guardar. Intentá de nuevo.")
+        await update.message.reply_text("⚠️ No se pudo guardar. Intente de nuevo.")
 
 
 async def vigilar_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("Usá: /vigilar_stop email@ejemplo.com")
+        await update.message.reply_text("Use: /vigilar_stop correo@ejemplo.com")
         return
     email_address = context.args[0].lower().strip()
     await remove_email_watch(chat_id, email_address)
@@ -1288,11 +1291,14 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if chat_id != ADMIN_CHAT_ID:
         return
 
-    if not context.args:
-        await update.message.reply_text("Usá: /broadcast <mensaje>")
+    # Use the raw text (minus the command) so newlines/formatting survive —
+    # context.args collapses everything into single spaces.
+    raw = update.message.text or ""
+    text = re.sub(r"^/broadcast(@\w+)?\s*", "", raw, count=1).strip()
+    if not text:
+        await update.message.reply_text("Use: /broadcast <mensaje>")
         return
 
-    text = " ".join(context.args)
     users = await get_active_users()
     sent, failed = 0, 0
     for u in users:
@@ -1322,14 +1328,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user.get("access_token"):
         oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
         await message.reply_text(
-            f"⚠️ Todavía no conectaste tu cuenta de Google.\n\n"
-            f"Completá la configuración aquí:\n{oauth_url}"
+            f"⚠️ Todavía no conectó su cuenta de Google.\n\n"
+            f"Complete la configuración aquí:\n{oauth_url}"
         )
         return
 
     if user.get("estado_suscripcion") not in ("activo", "trial"):
         await message.reply_text(
-            f"⚠️ Tu suscripción no está activa.\n\nActivá tu plan aquí:\n{PAYMENT_LINK}"
+            f"⚠️ Su suscripción no está activa.\n\nActive su plan aquí:\n{PAYMENT_LINK}"
         )
         return
 
@@ -1343,7 +1349,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await message.reply_text(f"🗣️ Transcripción: {text}")
         except Exception as e:
             logger.error(f"Voice transcription error for user {chat_id}: {e}")
-            await message.reply_text("⚠️ No pude transcribir el audio. Intentá de nuevo.")
+            await message.reply_text("⚠️ No pude transcribir el audio. Intente de nuevo.")
             return
     else:
         text = message.text or ""
@@ -1360,14 +1366,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if user and user.get("access_token"):
         await update.message.reply_text(
-            "👋 ¡Hola! Ya estás configurado y listo.\n\n"
-            "Podés decirme:\n"
+            "👋 ¡Hola! Ya está configurado y listo.\n\n"
+            "Puede decirme:\n"
             "• .texto → agregar tarea\n"
             "• .número → eliminar tarea por número\n"
             "• 'qué tengo hoy' → ver eventos del día\n"
             "• 'crear reunión el viernes a las 10' → agregar evento\n"
             "• Audio de voz 🎤 → lo transcribo y proceso\n\n"
-            "Para reconectar tu cuenta de Google usá /reconectar"
+            "Para reconectar su cuenta de Google use /reconectar"
         )
     else:
         await _start_onboarding(update)
@@ -1380,8 +1386,8 @@ async def reconectar_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await create_user(chat_id, nombre)
     oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
     await update.message.reply_text(
-        f"🔗 Hacé clic aquí para reconectar tu cuenta de Google:\n{oauth_url}\n\n"
-        "Tus tareas y datos no se van a borrar."
+        f"🔗 Haga clic aquí para reconectar su cuenta de Google:\n{oauth_url}\n\n"
+        "Sus tareas y datos no se borrarán."
     )
 
 
@@ -1394,11 +1400,11 @@ async def _start_onboarding(update: Update) -> None:
 
     oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
     await update.message.reply_text(
-        f"👋 ¡Hola {nombre}! Bienvenido a tu asistente personal.\n\n"
-        f"Para empezar, necesito conectar tu cuenta de Google. "
-        f"Esto me da acceso a tu Calendar y crea tu hoja de tareas en Google Sheets.\n\n"
-        f"👉 Hacé clic aquí para autorizar:\n{oauth_url}\n\n"
-        f"Una vez que completes la autorización, ¡ya podés usar el bot!"
+        f"👋 ¡Hola {nombre}! Bienvenido a su asistente personal.\n\n"
+        f"Para empezar, necesito conectar su cuenta de Google. "
+        f"Esto me da acceso a su Calendar y crea su hoja de tareas en Google Sheets.\n\n"
+        f"👉 Haga clic aquí para autorizar:\n{oauth_url}\n\n"
+        f"Una vez que complete la autorización, ¡ya puede usar el bot!"
     )
 
 

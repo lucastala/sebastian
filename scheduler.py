@@ -44,7 +44,7 @@ async def send_daily_summary(bot: Bot) -> None:
                         lines.append(f"- Todo el día: {ev['nombre']}")
                 events_block = "\n".join(lines)
             else:
-                events_block = "📅 No tenés eventos para hoy."
+                events_block = "📅 No tiene eventos para hoy."
 
             if tasks:
                 task_lines = ["📋 Tareas pendientes:"]
@@ -52,13 +52,13 @@ async def send_daily_summary(bot: Bot) -> None:
                     task_lines.append(f"{i}. {t['tarea']}")
                 tasks_block = "\n".join(task_lines)
             else:
-                tasks_block = "No tenés tareas pendientes."
+                tasks_block = "No tiene tareas pendientes."
 
             text = (
-                f"☀️ Buenos días! Acá tu resumen de hoy:\n\n"
+                f"☀️ ¡Buenos días! Este es su resumen de hoy:\n\n"
                 f"{events_block}\n\n"
                 f"{tasks_block}\n\n"
-                f"Usá .texto para agregar tarea. Usá .número para eliminar."
+                f"Use .texto para agregar una tarea. Use .número para eliminar."
             )
 
             await bot.send_message(chat_id=user["chat_id"], text=text)

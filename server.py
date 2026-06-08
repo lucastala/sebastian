@@ -51,8 +51,8 @@ _SUCCESS_HTML = """
 <body>
   <div class="card">
     <h1>✅ ¡Autorización completada!</h1>
-    <p>Tu cuenta de Google fue conectada exitosamente.</p>
-    <p>Volvé a Telegram para empezar a usar el bot.</p>
+    <p>Su cuenta de Google fue conectada exitosamente.</p>
+    <p>Vuelva a Telegram para empezar a usar el bot.</p>
   </div>
 </body>
 </html>
@@ -132,7 +132,7 @@ async def oauth_callback(request: Request):
         chat_id = int(chat_id_str)
     except (ValueError, AttributeError):
         return HTMLResponse(
-            _ERROR_HTML.format(message="Estado inválido. Pedí el link de nuevo."),
+            _ERROR_HTML.format(message="Estado inválido. Pida el enlace de nuevo."),
             status_code=400,
         )
 
@@ -146,7 +146,7 @@ async def oauth_callback(request: Request):
     except Exception as e:
         logger.error(f"Token exchange failed for chat_id={chat_id}: {e}")
         return HTMLResponse(
-            _ERROR_HTML.format(message="No se pudo completar la autorización. Pedí el link de nuevo."),
+            _ERROR_HTML.format(message="No se pudo completar la autorización. Pida el enlace de nuevo."),
             status_code=500,
         )
 
@@ -193,13 +193,13 @@ async def oauth_callback(request: Request):
                         "chat_id": chat_id,
                         "text": (
                             "✅ ¡Cuenta de Google conectada!\n\n"
-                            "Ya podés usar tu asistente. Así funciona:\n\n"
+                            "Ya puede usar su asistente. Así funciona:\n\n"
                             "📝 .llamar al médico → agregar tarea\n"
                             "✅ .1 → eliminar tarea número 1\n"
                             "📅 'qué tengo hoy' → ver eventos\n"
                             "➕ 'reunión el viernes a las 10' → crear evento\n"
                             "🎤 Audio de voz → lo transcribo automáticamente\n\n"
-                            "¡Estás listo!"
+                            "¡Listo para empezar!"
                         ),
                     },
                     timeout=10,
