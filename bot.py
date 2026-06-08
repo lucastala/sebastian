@@ -319,6 +319,49 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "watch_email",
+            "description": (
+                "Activa la vigilancia de una dirección de email: cuando llegue un mail de esa "
+                "dirección se le notifica al usuario automáticamente. "
+                "Usá esta función cuando el usuario pida 'avisame cuando me llegue un mail de X', "
+                "'vigilá los mails de X', 'notificame si X me escribe', etc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_address": {
+                        "type": "string",
+                        "description": "Dirección de email a vigilar",
+                    },
+                },
+                "required": ["email_address"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unwatch_email",
+            "description": (
+                "Desactiva la vigilancia de una dirección de email. "
+                "Usá esta función cuando el usuario pida 'dejá de vigilar X', "
+                "'ya no me avises de X', 'sacá la vigilancia de X', etc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_address": {
+                        "type": "string",
+                        "description": "Dirección de email que se deja de vigilar",
+                    },
+                },
+                "required": ["email_address"],
+            },
+        },
+    },
 ]
 
 
@@ -448,6 +491,12 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
     if func_name == "send_email":
         ok = await send_email(user, func_args["to"], func_args["subject"], func_args["body"])
         return {"ok": ok}
+    if func_name == "watch_email":
+        ok = await add_email_watch(user["chat_id"], func_args["email_address"])
+        return {"ok": ok, "email": func_args["email_address"]}
+    if func_name == "unwatch_email":
+        ok = await remove_email_watch(user["chat_id"], func_args["email_address"])
+        return {"ok": ok, "email": func_args["email_address"]}
     return {"error": f"Función desconocida: {func_name}"}
 
 
