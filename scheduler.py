@@ -83,13 +83,23 @@ async def check_email_watches(bot: Bot) -> None:
         try:
             new_emails = await get_emails_from_since(user, email_address, last_checked)
             for mail in new_emails:
-                text = (
+                header = (
                     f"📧 *Nuevo mail de {email_address}*\n\n"
                     f"*Asunto:* {mail['asunto']}\n"
                     f"*De:* {mail['remitente']}\n\n"
-                    f"{mail['snippet']}"
                 )
-                await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+                snippet = mail["snippet"]
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=header + snippet,
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=f"📧 Nuevo mail de {email_address}\n\nAsunto: {mail['asunto']}\nDe: {mail['remitente']}\n\n{snippet}",
+                    )
             await update_watch_last_checked(chat_id, email_address, now)
         except GmailPermissionError:
             logger.warning(f"No Gmail permission for user {chat_id}")

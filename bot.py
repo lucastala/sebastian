@@ -704,11 +704,14 @@ async def _route_text(
         reply, keyboard = "⚠️ Tuve un error procesando tu mensaje. Intentá de nuevo.", None
 
     footer = await build_tasks_footer(user)
-    full_text = reply + "\n\n" + footer
     try:
-        await message.reply_text(full_text, parse_mode="Markdown", reply_markup=keyboard)
+        await message.reply_text(
+            reply + "\n\n" + footer, parse_mode="Markdown", reply_markup=keyboard
+        )
     except Exception:
-        await message.reply_text(full_text, reply_markup=keyboard)
+        # Reply may contain special chars — send plain, then footer with Markdown
+        await message.reply_text(reply, reply_markup=keyboard)
+        await message.reply_text(footer, parse_mode="Markdown")
 
 
 # ── Create event conflict confirmation callback ───────────────────────────────
