@@ -229,6 +229,27 @@ def _is_task_add_intent(text: str) -> bool:
     return has_verb and has_ctx
 
 
+_TASK_LIST_PHRASES = (
+    "mostrame la lista", "mostrá la lista", "mostra la lista", "mostrame las tareas",
+    "mostrame mis tareas", "mostrá mis tareas", "ver la lista", "ver mis tareas",
+    "ver tareas", "ver las tareas", "mis tareas", "mis pendientes",
+    "qué tareas tengo", "que tareas tengo", "lista de tareas", "mostrame los pendientes",
+    "mostrame la lista de tareas", "dame la lista", "pasame la lista", "pasame las tareas",
+)
+
+
+def _is_task_list_request(text: str) -> bool:
+    t = text.lower()
+    if "gasto" in t or "fijo" in t:
+        return False
+    return any(p in t for p in _TASK_LIST_PHRASES)
+
+
+def _is_menu_request(text: str) -> bool:
+    t = text.lower()
+    return "menú" in t or re.search(r"\bmenu\b", t) is not None
+
+
 def _is_expense_delete_intent(text: str) -> bool:
     t = text.lower()
     if "fijo" in t:
@@ -1011,15 +1032,19 @@ async def _call_openai(
     if not msg.tool_calls:
         reply = msg.content or "No pude procesar tu mensaje."
         _add_to_history(chat_id, text, reply)
-        return reply, None
+        return reply, None, False
 
     messages.append(msg)
     pending_keyboard: InlineKeyboardMarkup | None = None
+    show_tasks = False  # only append the tasks list when the list actually changed
 
     for tc in msg.tool_calls:
         func_name = tc.function.name
         func_args = json.loads(tc.function.arguments)
         logger.info(f"Tool call: {func_name}({func_args}) for user {chat_id}")
+
+        if func_name in ("add_task", "update_task"):
+            show_tasks = True
 
         if func_name == "delete_event":
             query = func_args.get("query", "")
@@ -1105,7 +1130,7 @@ async def _call_openai(
     )
     reply = final.choices[0].message.content or "Listo."
     _add_to_history(chat_id, text, reply)
-    return reply, pending_keyboard
+    return reply, pending_keyboard, show_tasks
 
 
 async def _transcribe_voice(voice_bytes: bytes) -> str:
@@ -1151,6 +1176,156 @@ async def handle_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_text(header + footer, parse_mode="Markdown")
 
 
+# ── Menú interactivo ──────────────────────────────────────────────────────────
+
+def _fmt_money(value) -> str:
+    """Format a number as Argentine pesos: 15500 -> $15.500"""
+    try:
+        return f"${int(round(float(value))):,}".replace(",", ".")
+    except (ValueError, TypeError):
+        return f"${value}"
+
+
+def _fmt_dia(fecha_str: str) -> str:
+    try:
+        return datetime.strptime(fecha_str, "%Y-%m-%d").strftime("%d/%m")
+    except (ValueError, TypeError):
+        return ""
+
+
+def _build_main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💸 Gastos", callback_data="menu_gastos")],
+        [InlineKeyboardButton("🔁 Gastos fijos", callback_data="menu_fijos")],
+        [InlineKeyboardButton("📋 Tareas", callback_data="menu_tareas")],
+        [InlineKeyboardButton("📅 Eventos de hoy", callback_data="menu_hoy")],
+        [InlineKeyboardButton("✖️ Cerrar", callback_data="menu_close")],
+    ])
+
+
+def _build_gastos_cat_menu() -> InlineKeyboardMarkup:
+    rows = []
+    for i in range(0, len(EXPENSE_CATEGORIES), 2):
+        row = []
+        for j in (i, i + 1):
+            if j < len(EXPENSE_CATEGORIES):
+                cat = EXPENSE_CATEGORIES[j]
+                emoji = CATEGORIA_EMOJI.get(cat, "")
+                row.append(InlineKeyboardButton(f"{emoji} {cat}", callback_data=f"menu_gcat_{j}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _menu_back(target: str, label: str = "⬅️ Volver al menú") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=target)]])
+
+
+def _format_categoria_gastos(cat: str, data: dict) -> str:
+    emoji = CATEGORIA_EMOJI.get(cat, "")
+    gastos = data.get("gastos", [])
+    if not gastos:
+        return f"{emoji} *{cat}* — este mes\n\nNo hay gastos en esta categoría este mes."
+    lines = [f"{emoji} *{cat}* — este mes\n"]
+    for g in gastos:
+        desc = g.get("descripcion") or "(sin descripción)"
+        dia = _fmt_dia(str(g.get("fecha", "")))
+        suffix = f" ({dia})" if dia else ""
+        lines.append(f"{g['n']}. {desc} — {_fmt_money(g.get('monto'))}{suffix}")
+    lines.append(f"\n*Total:* {_fmt_money(data.get('total', 0))}")
+    return "\n".join(lines)
+
+
+def _format_fijos(fijos: list[dict]) -> str:
+    if not fijos:
+        return "🔁 *Gastos fijos*\n\nNo tiene gastos fijos activos."
+    lines = ["🔁 *Gastos fijos activos:*\n"]
+    for f in fijos:
+        emoji = CATEGORIA_EMOJI.get(str(f.get("categoria", "")), "")
+        dia = f.get("dia_del_mes", 1)
+        lines.append(f"• {emoji} {f.get('nombre')} — {_fmt_money(f.get('monto'))} (día {dia})")
+    return "\n".join(lines)
+
+
+def _format_today_events(events: list[dict]) -> str:
+    if not events:
+        return "📅 No tiene eventos para hoy."
+    lines = ["📅 *Eventos de hoy:*\n"]
+    for ev in events:
+        inicio = ev.get("inicio", "")
+        if "T" in inicio:
+            hora = inicio.split("T")[1][:5]
+            lines.append(f"• {hora} — {ev['nombre']}")
+        else:
+            lines.append(f"• Todo el día — {ev['nombre']}")
+    return "\n".join(lines)
+
+
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user:
+        return
+
+    if data == "menu_close":
+        await query.edit_message_text("Menú cerrado.")
+        return
+
+    if data == "menu_main":
+        await query.edit_message_text(
+            "📲 *Menú* — ¿qué desea ver?",
+            parse_mode="Markdown", reply_markup=_build_main_menu(),
+        )
+        return
+
+    if data == "menu_gastos":
+        await query.edit_message_text(
+            "💸 *Gastos por categoría* — elija una:",
+            parse_mode="Markdown", reply_markup=_build_gastos_cat_menu(),
+        )
+        return
+
+    if data == "menu_tareas":
+        footer = await build_tasks_footer(user)
+        await query.edit_message_text(
+            footer, parse_mode="Markdown", reply_markup=_menu_back("menu_main"),
+        )
+        return
+
+    if data == "menu_fijos":
+        fijos = await get_fixed_expenses(user)
+        await query.edit_message_text(
+            _format_fijos(fijos), parse_mode="Markdown", reply_markup=_menu_back("menu_main"),
+        )
+        return
+
+    if data == "menu_hoy":
+        events = await get_today_events(user)
+        await query.edit_message_text(
+            _format_today_events(events), parse_mode="Markdown",
+            reply_markup=_menu_back("menu_main"),
+        )
+        return
+
+    if data.startswith("menu_gcat_"):
+        idx = int(data.rsplit("_", 1)[1])
+        if idx < 0 or idx >= len(EXPENSE_CATEGORIES):
+            return
+        cat = EXPENSE_CATEGORIES[idx]
+        now = datetime.now(ARGENTINA_TZ)
+        desde = now.replace(day=1).strftime("%Y-%m-%d")
+        hasta = now.strftime("%Y-%m-%d")
+        exp = await get_expenses(user, desde=desde, hasta=hasta, categoria=cat)
+        await query.edit_message_text(
+            _format_categoria_gastos(cat, exp), parse_mode="Markdown",
+            reply_markup=_menu_back("menu_gastos", "⬅️ Volver a categorías"),
+        )
+        return
+
+
 # ── Message routing ───────────────────────────────────────────────────────────
 
 async def _route_text(
@@ -1160,6 +1335,11 @@ async def _route_text(
 
     if text.startswith("."):
         content = text[1:].strip()
+
+        if content.lower() in ("tareas", "lista"):
+            footer = await build_tasks_footer(user)
+            await message.reply_text(footer, parse_mode="Markdown")
+            return
 
         if re.match(r"^\d+$", content):
             pos = int(content)
@@ -1195,9 +1375,25 @@ async def _route_text(
             )
         return
 
+    # Menú interactivo
+    if _is_menu_request(text):
+        await message.reply_text(
+            "📲 *Menú* — ¿qué desea ver?",
+            parse_mode="Markdown",
+            reply_markup=_build_main_menu(),
+        )
+        return
+
+    # Pedido explícito de la lista de tareas
+    if _is_task_list_request(text):
+        footer = await build_tasks_footer(user)
+        await message.reply_text(footer, parse_mode="Markdown")
+        return
+
     # OpenAI function calling
+    show_tasks = False
     try:
-        reply, keyboard = await _call_openai(user, text)
+        reply, keyboard, show_tasks = await _call_openai(user, text)
     except GmailPermissionError:
         reply = _gmail_reauth_text(user["chat_id"])
         keyboard = None
@@ -1205,15 +1401,16 @@ async def _route_text(
         logger.error(f"OpenAI error for user {user['chat_id']}: {e}")
         reply, keyboard = "⚠️ Tuve un error procesando su mensaje. Intente de nuevo.", None
 
-    footer = await build_tasks_footer(user)
+    # The tasks list is only appended when the list actually changed.
+    footer = await build_tasks_footer(user) if show_tasks else None
+    full_text = reply + ("\n\n" + footer if footer else "")
     try:
-        await message.reply_text(
-            reply + "\n\n" + footer, parse_mode="Markdown", reply_markup=keyboard
-        )
+        await message.reply_text(full_text, parse_mode="Markdown", reply_markup=keyboard)
     except Exception:
         # Reply may contain special chars — send plain, then footer with Markdown
         await message.reply_text(reply, reply_markup=keyboard)
-        await message.reply_text(footer, parse_mode="Markdown")
+        if footer:
+            await message.reply_text(footer, parse_mode="Markdown")
 
 
 # ── Create event conflict confirmation callback ───────────────────────────────
@@ -1416,6 +1613,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Puede decirme:\n"
             "• .texto → agregar tarea\n"
             "• .número → eliminar tarea por número\n"
+            "• .tareas o .lista → ver la lista de tareas\n"
+            "• /menu → abrir el menú (gastos, tareas, eventos)\n"
+            "• 'gasté 5000 en el super' → registrar un gasto\n"
             "• 'qué tengo hoy' → ver eventos del día\n"
             "• 'crear reunión el viernes a las 10' → agregar evento\n"
             "• Audio de voz 🎤 → lo transcribo y proceso\n\n"
@@ -1423,6 +1623,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
     else:
         await _start_onboarding(update)
+
+
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user or not user.get("access_token"):
+        await update.message.reply_text("⚠️ Primero necesita conectar su cuenta de Google.")
+        return
+    await update.message.reply_text(
+        "📲 *Menú* — ¿qué desea ver?",
+        parse_mode="Markdown", reply_markup=_build_main_menu(),
+    )
 
 
 async def reconectar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1488,11 +1700,13 @@ def main() -> None:
     app.add_handler(CommandHandler("vigilar", vigilar_command))
     app.add_handler(CommandHandler("vigilar_stop", vigilar_stop_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
     app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
     app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
     app.add_handler(CallbackQueryHandler(handle_delete_event, pattern=r"^delEvent"))
     app.add_handler(CallbackQueryHandler(handle_create_conflict, pattern=r"^createConflict_"))
+    app.add_handler(CallbackQueryHandler(handle_menu, pattern=r"^menu_"))
 
     logger.info("Bot starting — polling for updates")
     app.run_polling(allowed_updates=["message", "callback_query"])
