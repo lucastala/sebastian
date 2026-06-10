@@ -26,6 +26,7 @@ from database import (
     get_email_watches,
     get_user,
     remove_email_watch,
+    update_user_genero,
 )
 from google_services import (
     GmailPermissionError,
@@ -1005,15 +1006,30 @@ async def _call_openai(
     dia_semana = DIAS_ES[now.weekday()]
     chat_id = user["chat_id"]
 
+    genero = (user.get("genero") or "").lower()
+    if genero == "f":
+        trato = (
+            "Dirigite a la usuaria llamándola 'señora' de forma muy frecuente "
+            "(al saludar, al confirmar y al despedirte). Nunca le digas 'señor'."
+        )
+    elif genero == "m":
+        trato = (
+            "Dirigite al usuario llamándolo 'señor' de forma muy frecuente "
+            "(al saludar, al confirmar y al despedirte). Nunca le digas 'señora'."
+        )
+    else:
+        trato = "Dirigite al usuario de usted, de forma sumamente respetuosa."
+
     system_msg = {
         "role": "system",
         "content": (
-            "Sos un asistente personal de productividad. "
+            "Sos un asistente personal de productividad sumamente formal y ceremonioso. "
             "Ayudás a gestionar tareas y eventos de Google Calendar. "
-            "Dirigite al usuario SIEMPRE de USTED (nunca de vos ni de tú): "
-            "usá 'usted', 'tiene', 'puede', 'avíseme', 'su cuenta', etc. "
-            "Mantené un tono cordial y profesional, claro y conciso, sin ser acartonado. "
-            "El usuario puede escribirte de vos, pero vos siempre respondé de usted. "
+            "Hablás SIEMPRE de USTED (nunca de vos ni de tú), con un tono exageradamente "
+            "cortés, servicial y elegante, usando fórmulas de cortesía como 'con gusto', "
+            "'a su entera disposición', 'si me permite', 'será un placer'. "
+            f"{trato} "
+            "El usuario puede escribirte de vos, pero vos respondé siempre con este trato formal. "
             f"La fecha de hoy es {today} ({dia_semana}). "
             "Si el usuario menciona días relativos (mañana, el lunes, el próximo sábado, etc.), "
             "calculá la fecha exacta a partir de hoy usando el día de la semana indicado. "
@@ -1315,6 +1331,8 @@ def _build_main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💰 Balance del mes", callback_data="menu_balance")],
         [InlineKeyboardButton("📋 Tareas", callback_data="menu_tareas")],
         [InlineKeyboardButton("📅 Eventos de hoy", callback_data="menu_hoy")],
+        [InlineKeyboardButton("📧 Correos vigilados", callback_data="menu_mails")],
+        [InlineKeyboardButton("⚙️ Configuración", callback_data="menu_config")],
         [InlineKeyboardButton("✖️ Cerrar", callback_data="menu_close")],
     ])
 
@@ -1335,6 +1353,50 @@ def _build_gastos_cat_menu() -> InlineKeyboardMarkup:
 
 def _menu_back(target: str, label: str = "⬅️ Volver al menú") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=target)]])
+
+
+def _format_mails(watches: list[dict]) -> str:
+    if not watches:
+        return (
+            "📧 *Correos vigilados*\n\nNo está vigilando ningún correo.\n"
+            "Diga: \"avíseme cuando me llegue un mail de ...\""
+        )
+    return "📧 *Correos vigilados*\n\nToque uno para dejar de vigilarlo:"
+
+
+def _build_mails_menu(watches: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"🗑️ {w['email_address']}", callback_data=f"menu_maildel_{i}")]
+        for i, w in enumerate(watches)
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _genero_label(user: dict) -> str:
+    g = (user.get("genero") or "").lower()
+    return {"f": "Femenino (señora)", "m": "Masculino (señor)"}.get(g, "Sin definir")
+
+
+def _format_config(user: dict) -> str:
+    return f"⚙️ *Configuración*\n\n👤 Trato: *{_genero_label(user)}*"
+
+
+def _build_config_menu(user: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"👤 Sexo: {_genero_label(user)}", callback_data="menu_sexo")],
+        [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
+    ])
+
+
+def _build_sexo_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("♀️ Femenino", callback_data="menu_setsex_f"),
+            InlineKeyboardButton("♂️ Masculino", callback_data="menu_setsex_m"),
+        ],
+        [InlineKeyboardButton("⬅️ Volver", callback_data="menu_config")],
+    ])
 
 
 def _format_categoria_gastos(cat: str, data: dict) -> str:
@@ -1446,6 +1508,50 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text(
             _format_today_events(events), parse_mode="Markdown",
             reply_markup=_menu_back("menu_main"),
+        )
+        return
+
+    if data == "menu_mails":
+        watches = await get_email_watches(chat_id)
+        await query.edit_message_text(
+            _format_mails(watches), parse_mode="Markdown",
+            reply_markup=_build_mails_menu(watches),
+        )
+        return
+
+    if data.startswith("menu_maildel_"):
+        idx = int(data.rsplit("_", 1)[1])
+        watches = await get_email_watches(chat_id)
+        if 0 <= idx < len(watches):
+            await remove_email_watch(chat_id, watches[idx]["email_address"])
+        watches = await get_email_watches(chat_id)
+        await query.edit_message_text(
+            _format_mails(watches), parse_mode="Markdown",
+            reply_markup=_build_mails_menu(watches),
+        )
+        return
+
+    if data == "menu_config":
+        await query.edit_message_text(
+            _format_config(user), parse_mode="Markdown",
+            reply_markup=_build_config_menu(user),
+        )
+        return
+
+    if data == "menu_sexo":
+        await query.edit_message_text(
+            "👤 ¿Cómo prefiere que me dirija a usted?",
+            reply_markup=_build_sexo_menu(),
+        )
+        return
+
+    if data in ("menu_setsex_f", "menu_setsex_m"):
+        genero = "f" if data.endswith("_f") else "m"
+        await update_user_genero(chat_id, genero)
+        user = await get_user(chat_id)
+        await query.edit_message_text(
+            _format_config(user), parse_mode="Markdown",
+            reply_markup=_build_config_menu(user),
         )
         return
 
