@@ -1226,6 +1226,37 @@ async def _transcribe_voice(voice_bytes: bytes) -> str:
     return result.text
 
 
+async def _extract_ticket(image_bytes: bytes) -> dict:
+    """Read a receipt photo with vision and return {monto, categoria, descripcion, fecha}."""
+    today = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+    b64 = base64.b64encode(image_bytes).decode()
+    resp = await openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Sos un extractor de datos de tickets y comprobantes de compra. "
+                    "Devolvé SOLO un JSON con las claves: monto (number, el total pagado), "
+                    f"categoria (una de: {', '.join(EXPENSE_CATEGORIES)}), "
+                    "descripcion (string corta, ej. el comercio o lo comprado), "
+                    "fecha (YYYY-MM-DD; si no se ve, usá " + today + "). "
+                    "Si no podés leer el monto total, poné monto = 0."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extraé los datos de este ticket."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            },
+        ],
+        response_format={"type": "json_object"},
+    )
+    return json.loads(resp.choices[0].message.content or "{}")
+
+
 # ── Calendar callbacks ────────────────────────────────────────────────────────
 
 async def handle_cal_nav(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1662,6 +1693,55 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"✅ Enviado a {sent} usuarios. Fallidos: {failed}.")
 
 
+async def _handle_ticket_photo(update: Update, user: dict) -> None:
+    message = update.message
+    try:
+        photo = message.photo[-1]  # highest resolution
+        photo_file = await photo.get_file()
+        raw = await photo_file.download_as_bytearray()
+        data = await _extract_ticket(bytes(raw))
+    except Exception as e:
+        logger.error(f"Ticket photo error for user {user['chat_id']}: {e}")
+        await message.reply_text("⚠️ No pude procesar la foto del ticket. Intente de nuevo.")
+        return
+
+    try:
+        monto = float(data.get("monto") or 0)
+    except (ValueError, TypeError):
+        monto = 0
+    if not monto:
+        await message.reply_text(
+            "📷 No pude leer el monto del ticket. ¿Me lo dice? "
+            "Por ejemplo: \"gasté 5000 en el súper\"."
+        )
+        return
+
+    categoria = data.get("categoria") or "Otros"
+    if categoria not in EXPENSE_CATEGORIES:
+        categoria = "Otros"
+    descripcion = (data.get("descripcion") or "ticket").strip()
+    fecha = data.get("fecha")
+
+    ok = await add_expense(user, monto, categoria, descripcion, fecha)
+    if not ok:
+        await message.reply_text("⚠️ Leí el ticket pero no pude guardar el gasto. Intente de nuevo.")
+        return
+
+    emoji = CATEGORIA_EMOJI.get(categoria, "")
+    texto = (
+        "✅ Gasto registrado desde el ticket:\n"
+        f"{emoji} *{categoria}* — {_fmt_money(monto)}\n"
+        f"_{descripcion}_\n\n"
+        "Si algo no está bien, dígame (ej. \"cambiá el monto del 1 a 4500\")."
+    )
+    try:
+        await message.reply_text(texto, parse_mode="Markdown")
+    except Exception:
+        await message.reply_text(
+            f"✅ Gasto registrado: {categoria} — {_fmt_money(monto)} ({descripcion})"
+        )
+
+
 # ── Main handlers ─────────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1691,6 +1771,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await message.reply_chat_action("typing")
+
+    # Foto de un ticket/comprobante → registrar el gasto automáticamente
+    if message.photo:
+        await _handle_ticket_photo(update, user)
+        return
 
     if message.voice:
         try:
@@ -1724,6 +1809,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "• .tareas o .lista → ver la lista de tareas\n"
             "• /menu → abrir el menú (gastos, tareas, eventos)\n"
             "• 'gasté 5000 en el super' → registrar un gasto\n"
+            "• 'cobré 150000' → registrar un ingreso\n"
+            "• Foto de un ticket 📷 → registro el gasto solo\n"
             "• 'qué tengo hoy' → ver eventos del día\n"
             "• 'crear reunión el viernes a las 10' → agregar evento\n"
             "• Audio de voz 🎤 → lo transcribo y proceso\n\n"
@@ -1809,7 +1896,7 @@ def main() -> None:
     app.add_handler(CommandHandler("vigilar_stop", vigilar_stop_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("menu", menu_command))
-    app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT | filters.VOICE | filters.PHOTO, handle_message))
     app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
     app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
     app.add_handler(CallbackQueryHandler(handle_delete_event, pattern=r"^delEvent"))
