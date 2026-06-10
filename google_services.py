@@ -644,6 +644,85 @@ async def delete_expense(
     return await loop.run_in_executor(None, _delete)
 
 
+# ── Ingresos y balance ────────────────────────────────────────────────────────
+
+INCOME_HEADERS = ["fecha", "monto", "descripcion"]
+
+
+def _get_ingresos_ws(sh):
+    try:
+        return sh.worksheet("Ingresos")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Ingresos", rows=1000, cols=len(INCOME_HEADERS))
+        ws.append_row(INCOME_HEADERS)
+        return ws
+
+
+async def add_income(
+    user: dict, monto: float, descripcion: str = "", fecha: str | None = None
+) -> bool:
+    if not user.get("sheets_id"):
+        return False
+
+    creds = await refresh_user_credentials(user)
+    fecha = fecha or datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+    loop = asyncio.get_running_loop()
+
+    def _add():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        ws = _get_ingresos_ws(sh)
+        ws.append_row([fecha, monto, descripcion])
+        return True
+
+    return await loop.run_in_executor(None, _add)
+
+
+async def get_balance(
+    user: dict, desde: str | None = None, hasta: str | None = None
+) -> dict:
+    """Total income, total expenses and net balance for the period."""
+    empty = {"ingresos": 0.0, "gastos": 0.0, "balance": 0.0}
+    if not user.get("sheets_id"):
+        return empty
+
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _get():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+
+        gastos_total = 0.0
+        try:
+            gws = sh.worksheet("Gastos")
+            for _, r in _filter_expense_rows(gws.get_all_records(), desde, hasta, None):
+                gastos_total += _parse_monto(r.get("monto"))
+        except gspread.WorksheetNotFound:
+            pass
+
+        ingresos_total = 0.0
+        try:
+            iws = sh.worksheet("Ingresos")
+            for r in iws.get_all_records():
+                f = str(r.get("fecha", "")).strip()
+                if desde and f < desde:
+                    continue
+                if hasta and f > hasta:
+                    continue
+                ingresos_total += _parse_monto(r.get("monto"))
+        except gspread.WorksheetNotFound:
+            pass
+
+        return {
+            "ingresos": ingresos_total,
+            "gastos": gastos_total,
+            "balance": ingresos_total - gastos_total,
+        }
+
+    return await loop.run_in_executor(None, _get)
+
+
 # ── Gastos fijos (recurrentes mensuales) ──────────────────────────────────────
 
 FIXED_HEADERS = ["nombre", "monto", "categoria", "dia_del_mes", "activo", "ultimo_mes_cargado"]

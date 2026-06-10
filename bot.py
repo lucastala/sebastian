@@ -1,3 +1,4 @@
+import base64
 import calendar as cal_module
 import io
 import json
@@ -30,12 +31,14 @@ from google_services import (
     GmailPermissionError,
     add_expense,
     add_fixed_expense,
+    add_income,
     add_task,
     cancel_fixed_expense,
     create_event,
     delete_event,
     delete_expense,
     delete_task_by_position,
+    get_balance,
     get_events_by_date,
     get_expenses,
     get_fixed_expenses,
@@ -165,6 +168,16 @@ _TASK_ADD_VERBS = (
     "agendame la tarea", "poné en la lista", "pone en la lista", "ponme en la lista",
 )
 _TASK_CONTEXT = ("tarea", "tareas", "lista", "pendiente", "pendientes")
+_INCOME_ADD_STEMS = (
+    "cobré", "cobre", "me pagaron", "me pagó", "me pago", "me depositaron",
+    "me deposito", "me depositó", "ingresó", "ingreso de", "recibí", "recibi",
+    "me transfirieron", "me transfirió", "me entró", "me entro",
+)
+_BALANCE_PHRASES = (
+    "balance", "mi saldo", "saldo del mes", "cuánto me queda", "cuanto me queda",
+    "cuánto tengo", "cuanto tengo", "cómo voy este mes", "como voy este mes",
+    "cuánto gané", "cuanto gane", "cuánto ahorré", "cuanto ahorre",
+)
 _EXPENSE_DELETE_VERBS = ("borrá", "borra", "eliminá", "elimina", "sacá", "saca", "quitá", "quita")
 _EXPENSE_EDIT_MARKERS = (
     "cambiá", "cambia", "corregí", "corregi", "actualizá", "actualiza",
@@ -248,6 +261,17 @@ def _is_task_list_request(text: str) -> bool:
 def _is_menu_request(text: str) -> bool:
     t = text.lower()
     return "menú" in t or re.search(r"\bmenu\b", t) is not None
+
+
+def _is_income_add_intent(text: str) -> bool:
+    t = text.lower()
+    has_verb = any(s in t for s in _INCOME_ADD_STEMS)
+    return has_verb and bool(re.search(r"\d", t))
+
+
+def _is_balance_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _BALANCE_PHRASES)
 
 
 def _is_expense_delete_intent(text: str) -> bool:
@@ -728,6 +752,46 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_income",
+            "description": (
+                "Registra un ingreso/cobro del usuario. Usalo cuando diga que YA cobró, le pagaron, "
+                "recibió o le depositaron dinero (verbo en pasado, con un monto). "
+                "Si menciona una fecha calculala; si no, usá hoy."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "monto": {"type": "number", "description": "Monto del ingreso en pesos"},
+                    "descripcion": {"type": "string", "description": "De qué fue el ingreso (sueldo, venta, etc.)"},
+                    "fecha": {"type": "string", "description": "Fecha YYYY-MM-DD (opcional, por defecto hoy)"},
+                },
+                "required": ["monto"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_balance",
+            "description": (
+                "Calcula el balance del usuario en un período: total de ingresos, total de gastos y "
+                "el neto (ingresos − gastos). Usalo cuando pregunte por su balance, saldo, cuánto le "
+                "queda o cómo viene el mes. Calculá desde/hasta según el período (para 'este mes', "
+                "desde el día 1 del mes actual hasta hoy)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "desde": {"type": "string", "description": "Fecha inicio YYYY-MM-DD (opcional)"},
+                    "hasta": {"type": "string", "description": "Fecha fin YYYY-MM-DD (opcional)"},
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
@@ -918,6 +982,18 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
     if func_name == "cancel_fixed_expense":
         nombre = await cancel_fixed_expense(user, func_args["nombre"])
         return {"ok": nombre is not None, "nombre": nombre}
+    if func_name == "add_income":
+        ok = await add_income(
+            user,
+            func_args["monto"],
+            func_args.get("descripcion", ""),
+            func_args.get("fecha"),
+        )
+        return {"ok": ok, "monto": func_args["monto"]}
+    if func_name == "get_balance":
+        return await get_balance(
+            user, desde=func_args.get("desde"), hasta=func_args.get("hasta")
+        )
     return {"error": f"Función desconocida: {func_name}"}
 
 
@@ -966,6 +1042,10 @@ async def _call_openai(
             "mismos filtros de categoría/fechas). "
             "OJO: 'pagar el monotributo' o 'tengo que pagar X' es una TAREA futura, no un gasto. "
             "Solo es gasto si ya ocurrió ('pagué', 'gasté', 'compré'). "
+            "\n\nREGLA PARA INGRESOS Y BALANCE: "
+            "Si el usuario dice que YA cobró/le pagaron/recibió dinero (verbo en pasado, con monto), "
+            "registralo con add_income. Si pregunta por su balance, saldo o cuánto le queda, usá "
+            "get_balance calculando el período. El balance es ingresos menos gastos."
             "\n\nREGLA PARA GASTOS FIJOS: "
             "Un gasto fijo es uno que se repite todos los meses (alquiler, seguro, patente, cuota "
             "de club, Netflix, etc.). Cuando el usuario lo declare ('el alquiler son 200000 por mes'), "
@@ -1012,6 +1092,10 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "watch_email"}}
     elif _is_unwatch_email_intent(text):
         tool_choice = {"type": "function", "function": {"name": "unwatch_email"}}
+    elif _is_balance_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "get_balance"}}
+    elif _is_income_add_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_income"}}
     elif _is_expense_query_intent(text):
         tool_choice = {"type": "function", "function": {"name": "get_expenses"}}
     elif _is_expense_add_intent(text):
@@ -1197,6 +1281,7 @@ def _build_main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💸 Gastos", callback_data="menu_gastos")],
         [InlineKeyboardButton("🔁 Gastos fijos", callback_data="menu_fijos")],
+        [InlineKeyboardButton("💰 Balance del mes", callback_data="menu_balance")],
         [InlineKeyboardButton("📋 Tareas", callback_data="menu_tareas")],
         [InlineKeyboardButton("📅 Eventos de hoy", callback_data="menu_hoy")],
         [InlineKeyboardButton("✖️ Cerrar", callback_data="menu_close")],
@@ -1245,6 +1330,19 @@ def _format_fijos(fijos: list[dict]) -> str:
         dia = f.get("dia_del_mes", 1)
         lines.append(f"• {emoji} {f.get('nombre')} — {_fmt_money(f.get('monto'))} (día {dia})")
     return "\n".join(lines)
+
+
+def _format_balance(bal: dict) -> str:
+    ingresos = bal.get("ingresos", 0)
+    gastos = bal.get("gastos", 0)
+    balance = bal.get("balance", 0)
+    signo = "🟢" if balance >= 0 else "🔴"
+    return (
+        "💰 *Balance de este mes*\n\n"
+        f"⬆️ Ingresos: {_fmt_money(ingresos)}\n"
+        f"⬇️ Gastos: {_fmt_money(gastos)}\n"
+        f"{signo} *Neto: {_fmt_money(balance)}*"
+    )
 
 
 def _format_today_events(events: list[dict]) -> str:
@@ -1299,6 +1397,16 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         fijos = await get_fixed_expenses(user)
         await query.edit_message_text(
             _format_fijos(fijos), parse_mode="Markdown", reply_markup=_menu_back("menu_main"),
+        )
+        return
+
+    if data == "menu_balance":
+        now = datetime.now(ARGENTINA_TZ)
+        desde = now.replace(day=1).strftime("%Y-%m-%d")
+        hasta = now.strftime("%Y-%m-%d")
+        bal = await get_balance(user, desde=desde, hasta=hasta)
+        await query.edit_message_text(
+            _format_balance(bal), parse_mode="Markdown", reply_markup=_menu_back("menu_main"),
         )
         return
 
