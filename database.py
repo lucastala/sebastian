@@ -72,11 +72,16 @@ async def update_user_sheet_id(chat_id: int, sheets_id: str) -> None:
     ).execute()
 
 
-async def update_user_genero(chat_id: int, genero: str) -> None:
-    """Set the user's address preference: 'm' (señor) or 'f' (señora)."""
-    get_supabase().table("usuarios").update({"genero": genero}).eq(
-        "chat_id", chat_id
-    ).execute()
+async def update_user_genero(chat_id: int, genero: str) -> bool:
+    """Set the user's address preference: 'm' (señor) or 'f' (señora). Returns success."""
+    try:
+        get_supabase().table("usuarios").update({"genero": genero}).eq(
+            "chat_id", chat_id
+        ).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating genero for {chat_id}: {e}")
+        return False
 
 
 async def check_subscription(chat_id: int) -> bool:

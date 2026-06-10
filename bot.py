@@ -1547,7 +1547,14 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data in ("menu_setsex_f", "menu_setsex_m"):
         genero = "f" if data.endswith("_f") else "m"
-        await update_user_genero(chat_id, genero)
+        ok = await update_user_genero(chat_id, genero)
+        if not ok:
+            await query.message.reply_text(
+                "⚠️ No pude guardar la preferencia. Falta crear la columna en la base:\n"
+                "`ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS genero TEXT;`",
+                parse_mode="Markdown",
+            )
+            return
         user = await get_user(chat_id)
         await query.edit_message_text(
             _format_config(user), parse_mode="Markdown",
