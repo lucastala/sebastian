@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 ARGENTINA_TZ = "America/Argentina/Buenos_Aires"
 
+# Events already notified this run — (chat_id, event_id). Cleared on restart.
+_notified_events: set[tuple[int, str]] = set()
+EVENT_REMINDER_MINUTES = 30
+
 
 async def send_daily_summary(bot: Bot) -> None:
     users = await get_active_users()
@@ -145,6 +149,45 @@ async def check_fixed_expenses(bot: Bot) -> None:
             logger.error(f"Error logging fixed expenses for {user['chat_id']}: {e}")
 
 
+async def check_upcoming_events(bot: Bot) -> None:
+    users = await get_active_users()
+    now = datetime.now(ARG_TZ)
+
+    for user in users:
+        if not user.get("access_token"):
+            continue
+        chat_id = user["chat_id"]
+        try:
+            events = await get_today_events(user)
+        except Exception as e:
+            logger.error(f"Error fetching events for reminders {chat_id}: {e}")
+            continue
+
+        for ev in events:
+            inicio = ev.get("inicio", "")
+            if "T" not in inicio:
+                continue  # all-day event, no time reminder
+            event_id = ev.get("id", "")
+            key = (chat_id, event_id)
+            if key in _notified_events:
+                continue
+            try:
+                start_dt = datetime.fromisoformat(inicio)
+            except ValueError:
+                continue
+            minutes_left = (start_dt - now).total_seconds() / 60
+            if 0 < minutes_left <= EVENT_REMINDER_MINUTES:
+                hora = inicio.split("T")[1][:5]
+                text = (
+                    f"⏰ En ~{int(round(minutes_left))} min: *{ev['nombre']}* ({hora})"
+                )
+                try:
+                    await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+                except Exception:
+                    await bot.send_message(chat_id=chat_id, text=f"⏰ En ~{int(round(minutes_left))} min: {ev['nombre']} ({hora})")
+                _notified_events.add(key)
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=ARGENTINA_TZ)
     scheduler.add_job(
@@ -169,6 +212,14 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="fixed_expenses",
         name="Monthly Fixed Expenses Logging",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_upcoming_events,
+        IntervalTrigger(minutes=10),
+        args=[bot],
+        id="event_reminders",
+        name="Upcoming Event Reminders",
         replace_existing=True,
     )
     return scheduler
