@@ -159,6 +159,12 @@ _FIXED_CANCEL_VERBS = (
     "cancelá", "cancela", "sacá", "saca", "eliminá", "elimina",
     "dar de baja", "dá de baja", "da de baja", "borrá", "borra", "quitá", "quita",
 )
+_TASK_ADD_VERBS = (
+    "agregame", "agregá", "agrega ", "añadí", "anadi", "añade", "añadime",
+    "anotá", "anota", "anotame", "anotame", "sumá", "sumame", "agregar",
+    "agendame la tarea", "poné en la lista", "pone en la lista", "ponme en la lista",
+)
+_TASK_CONTEXT = ("tarea", "tareas", "lista", "pendiente", "pendientes")
 _EXPENSE_DELETE_VERBS = ("borrá", "borra", "eliminá", "elimina", "sacá", "saca", "quitá", "quita")
 _EXPENSE_EDIT_MARKERS = (
     "cambiá", "cambia", "corregí", "corregi", "actualizá", "actualiza",
@@ -214,6 +220,13 @@ def _is_expense_add_intent(text: str) -> bool:
     has_verb = any(s in t for s in _EXPENSE_ADD_STEMS)
     has_number = bool(re.search(r"\d", t))
     return has_verb and has_number
+
+
+def _is_task_add_intent(text: str) -> bool:
+    t = text.lower()
+    has_verb = any(v in t for v in _TASK_ADD_VERBS)
+    has_ctx = any(c in t for c in _TASK_CONTEXT)
+    return has_verb and has_ctx
 
 
 def _is_expense_delete_intent(text: str) -> bool:
@@ -351,6 +364,28 @@ OPENAI_TOOLS = [
             "name": "get_pending_tasks",
             "description": "Obtiene las tareas pendientes del usuario desde Google Sheets",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_task",
+            "description": (
+                "Agrega una tarea pendiente a la lista del usuario. Usalo cuando el usuario pida "
+                "agregar/anotar/sumar una tarea o un pendiente en lenguaje natural. "
+                "Si menciona una fecha límite (mañana, el jueves, el 11, etc.), calculá la fecha exacta."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tarea": {"type": "string", "description": "Texto de la tarea"},
+                    "fecha": {
+                        "type": "string",
+                        "description": "Fecha límite en formato YYYY-MM-DD (opcional)",
+                    },
+                },
+                "required": ["tarea"],
+            },
         },
     },
     {
@@ -779,6 +814,12 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         )
     if func_name == "get_pending_tasks":
         return await get_pending_tasks(user)
+    if func_name == "add_task":
+        task_id = await add_task(user, func_args["tarea"])
+        if task_id and func_args.get("fecha"):
+            await update_task_fecha(user, task_id, func_args["fecha"])
+        return {"ok": task_id is not None, "tarea": func_args["tarea"],
+                "fecha": func_args.get("fecha")}
     if func_name == "update_event":
         result = await update_event(
             user,
@@ -889,6 +930,9 @@ async def _call_openai(
             "Cuando el usuario quiera editar un evento (cambiar hora, nombre o fecha), "
             "primero buscalo con search_event o get_events_by_date para obtener su ID, "
             "luego llamá update_event con los cambios. "
+            "\n\nREGLA PARA AGREGAR TAREAS: "
+            "Cuando el usuario pida agregar/anotar/sumar una tarea o pendiente, usá add_task. "
+            "Si menciona una fecha límite, calculala y pasala en formato YYYY-MM-DD."
             "\n\nREGLA PARA EDITAR TAREAS: "
             "Cuando el usuario quiera renombrar o cambiar la fecha de una tarea, "
             "usá update_task con su número de posición en la lista."
@@ -925,6 +969,8 @@ async def _call_openai(
             tool_choice = {"type": "function", "function": {"name": "delete_event"}}
         else:
             tool_choice = "auto"
+    elif _is_task_add_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_task"}}
     elif _is_fixed_query_intent(text):
         tool_choice = {"type": "function", "function": {"name": "get_fixed_expenses"}}
     elif _is_fixed_cancel_intent(text):
