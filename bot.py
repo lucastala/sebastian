@@ -1159,10 +1159,38 @@ async def _call_openai(
         func_args = json.loads(tc.function.arguments)
         logger.info(f"Tool call: {func_name}({func_args}) for user {chat_id}")
 
-        if func_name in ("add_task", "update_task"):
+        if func_name == "update_task":
             show_tasks = True
 
-        if func_name == "delete_event":
+        if func_name == "add_task":
+            tarea = func_args.get("tarea", "")
+            fecha = func_args.get("fecha")
+            task_id = await add_task(user, tarea)
+            if not task_id:
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": "No se pudo agregar la tarea (configuración de Google incompleta).",
+                })
+            elif fecha:
+                await update_task_fecha(user, task_id, fecha)
+                show_tasks = True
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": json.dumps({"ok": True, "tarea": tarea, "fecha": fecha}, ensure_ascii=False),
+                })
+            else:
+                # No due date given → show the calendar so the user can pick one
+                now = datetime.now(ARGENTINA_TZ)
+                pending_keyboard = _build_calendar_keyboard(task_id, now.year, now.month)
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": (
+                        f"Tarea '{tarea}' agregada. Decile al usuario que la agregaste y "
+                        "preguntale para cuándo es la fecha límite (se le está mostrando un "
+                        "calendario para elegirla)."
+                    ),
+                })
+        elif func_name == "delete_event":
             query = func_args.get("query", "")
             fecha = func_args.get("fecha")
             # Search for the event internally
