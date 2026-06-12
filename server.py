@@ -13,6 +13,7 @@ from google_auth_oauthlib.flow import Flow
 
 from database import get_user, update_user_sheet_id, update_user_tokens
 from google_services import create_user_sheet
+from texts import INSTRUCCIONES_TEXTO
 
 load_dotenv()
 
@@ -191,16 +192,8 @@ async def oauth_callback(request: Request):
                     f"https://api.telegram.org/bot{telegram_token}/sendMessage",
                     json={
                         "chat_id": chat_id,
-                        "text": (
-                            "✅ ¡Cuenta de Google conectada!\n\n"
-                            "Ya puede usar su asistente. Así funciona:\n\n"
-                            "📝 .llamar al médico → agregar tarea\n"
-                            "✅ .1 → eliminar tarea número 1\n"
-                            "📅 'qué tengo hoy' → ver eventos\n"
-                            "➕ 'reunión el viernes a las 10' → crear evento\n"
-                            "🎤 Audio de voz → lo transcribo automáticamente\n\n"
-                            "¡Listo para empezar!"
-                        ),
+                        "text": "✅ ¡Cuenta de Google conectada!\n\n" + INSTRUCCIONES_TEXTO,
+                        "parse_mode": "Markdown",
                     },
                     timeout=10,
                 )
