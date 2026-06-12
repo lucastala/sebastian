@@ -267,6 +267,9 @@ def _is_task_list_request(text: str) -> bool:
     t = text.lower()
     if "gasto" in t or "fijo" in t:
         return False
+    # "agregame en la lista de tareas X" is an ADD, not a request to view the list
+    if any(v in t for v in _TASK_ADD_VERBS):
+        return False
     return any(p in t for p in _TASK_LIST_PHRASES)
 
 
