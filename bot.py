@@ -165,10 +165,14 @@ _FIXED_CANCEL_VERBS = (
 )
 _TASK_ADD_VERBS = (
     "agregame", "agregá", "agrega ", "añadí", "anadi", "añade", "añadime",
-    "anotá", "anota", "anotame", "anotame", "sumá", "sumame", "agregar",
+    "anotá", "anota", "anotame", "sumá", "sumame", "agregar",
+    "recordame", "recordá", "recorda", "recuérdame", "recuerdame",
+    "acordate", "acordá", "acorda", "no te olvides", "no me olvides",
     "agendame la tarea", "poné en la lista", "pone en la lista", "ponme en la lista",
 )
 _TASK_CONTEXT = ("tarea", "tareas", "lista", "pendiente", "pendientes")
+# A specific time or one of these words means it's a calendar event, not a task
+_EVENT_WORDS = ("reunión", "reunion", "evento", "cita", "turno", "junta")
 _INCOME_ADD_STEMS = (
     "cobré", "cobre", "me pagaron", "me pagó", "me pago", "me depositaron",
     "me deposito", "me depositó", "ingresó", "ingreso de", "recibí", "recibi",
@@ -238,9 +242,16 @@ def _is_expense_add_intent(text: str) -> bool:
 
 def _is_task_add_intent(text: str) -> bool:
     t = text.lower()
-    has_verb = any(v in t for v in _TASK_ADD_VERBS)
-    has_ctx = any(c in t for c in _TASK_CONTEXT)
-    return has_verb and has_ctx
+    # If it names an event or has a specific time, it's a calendar event, not a task
+    if any(e in t for e in _EVENT_WORDS):
+        return False
+    if re.search(r"\ba las\s*\d|\b\d{1,2}\s*hs|\b\d{1,2}:\d{2}", t):
+        return False
+    # An explicit "add to list" verb is enough — no need for the word "tarea"
+    if any(v in t for v in _TASK_ADD_VERBS):
+        return True
+    # Otherwise require the verb + the task context word
+    return any(c in t for c in _TASK_CONTEXT) and "agreg" in t
 
 
 _TASK_LIST_PHRASES = (
@@ -1043,9 +1054,14 @@ async def _call_openai(
             "Cuando el usuario quiera editar un evento (cambiar hora, nombre o fecha), "
             "primero buscalo con search_event o get_events_by_date para obtener su ID, "
             "luego llamá update_event con los cambios. "
-            "\n\nREGLA PARA AGREGAR TAREAS: "
-            "Cuando el usuario pida agregar/anotar/sumar una tarea o pendiente, usá add_task. "
-            "Si menciona una fecha límite, calculala y pasala en formato YYYY-MM-DD."
+            "\n\nREGLA PARA AGREGAR TAREAS (MUY IMPORTANTE): "
+            "Cuando el usuario pida agregar/anotar/sumar/recordar algo que tiene que hacer, "
+            "o exprese un pendiente sin hora de calendario (ej. 'comprar pan', 'llamar al médico', "
+            "'tengo que ir al banco', 'recordame pagar la luz'), agregalo SIEMPRE con add_task. "
+            "NO respondas que lo agregaste sin antes llamar a add_task. "
+            "Si menciona una fecha límite, calculala y pasala en formato YYYY-MM-DD. "
+            "Si tiene una hora específica (ej. 'a las 10') o es una reunión/cita/turno, "
+            "entonces es un EVENTO de calendario (create_event), no una tarea."
             "\n\nREGLA PARA EDITAR TAREAS: "
             "Cuando el usuario quiera renombrar o cambiar la fecha de una tarea, "
             "usá update_task con su número de posición en la lista."
