@@ -1356,6 +1356,7 @@ def _build_main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📋 Tareas", callback_data="menu_tareas")],
         [InlineKeyboardButton("📅 Eventos de hoy", callback_data="menu_hoy")],
         [InlineKeyboardButton("📧 Correos vigilados", callback_data="menu_mails")],
+        [InlineKeyboardButton("📖 Instrucciones", callback_data="menu_help")],
         [InlineKeyboardButton("⚙️ Configuración", callback_data="menu_config")],
         [InlineKeyboardButton("✖️ Cerrar", callback_data="menu_close")],
     ])
@@ -1395,6 +1396,44 @@ def _build_mails_menu(watches: list[dict]) -> InlineKeyboardMarkup:
     ]
     rows.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
+
+
+INSTRUCCIONES_TEXTO = (
+    "📖 *Guía de Sebastian*\n\n"
+    "Háblele en lenguaje natural (texto o audio 🎤) o mándele una foto 📷. "
+    "Esto es todo lo que puede hacer:\n\n"
+    "*📋 Tareas*\n"
+    "• Agregar: \"recordame llamar al médico\", \"anotá comprar pan\", o `.comprar pan`\n"
+    "• Con fecha: \"agregá pagar la luz, vence el lunes\"\n"
+    "• Ver la lista: \"mostrame la lista\", `.tareas` o `.lista`\n"
+    "• Eliminar: `.número` (ej. `.2`) o \"borrá la tarea 2\"\n"
+    "• Editar: \"renombrá la tarea 1...\", \"ponele fecha el viernes a la tarea 3\"\n\n"
+    "*💸 Gastos*\n"
+    "• Registrar: \"gasté 5000 en el súper\", \"pagué 12000 de luz\"\n"
+    "• Foto del ticket 📷 → lo registra solo\n"
+    "• Ver: \"cuánto gasté este mes\", \"mostrame los gastos de transporte\"\n"
+    "• Editar/borrar: \"cambiá el monto del 1 a 4500\", \"borrá el gasto 2\"\n\n"
+    "*🔁 Gastos fijos* (se cargan solos cada mes)\n"
+    "• \"el alquiler son 200000 por mes\", \"agregá gasto fijo Netflix 5000\"\n"
+    "• \"cuáles son mis gastos fijos\", \"cancelá el gasto fijo del club\"\n\n"
+    "*💰 Ingresos y balance*\n"
+    "• \"cobré 150000\" → registra el ingreso\n"
+    "• \"cuál es mi balance\", \"cuánto me queda este mes\"\n\n"
+    "*📅 Eventos*\n"
+    "• Crear: \"reunión el viernes a las 10\" (avisa si se pisa con otro)\n"
+    "• Ver: \"qué tengo hoy\", \"qué tengo el martes\"\n"
+    "• Editar/eliminar: \"cambiá la hora de la reunión\", \"eliminá el evento X\"\n"
+    "• Le aviso ~30 min antes de cada evento ⏰\n\n"
+    "*📧 Correos (Gmail)*\n"
+    "• Buscar: \"buscá mails de la facultad\"\n"
+    "• Enviar: \"mandale un mail a juan@gmail.com diciendo que llego tarde\"\n"
+    "• Vigilar: \"avíseme cuando me llegue un mail de mi jefe@empresa.com\"\n"
+    "• Los correos vigilados se administran desde el menú\n\n"
+    "*📲 Menú y configuración*\n"
+    "• /menu abre todo con botones\n"
+    "• En Configuración elige el trato (señor/señora)\n\n"
+    "Todos los días a las 8:00 le mando un resumen del día. ☀️"
+)
 
 
 def _genero_label(user: dict) -> str:
@@ -1552,6 +1591,13 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text(
             _format_mails(watches), parse_mode="Markdown",
             reply_markup=_build_mails_menu(watches),
+        )
+        return
+
+    if data == "menu_help":
+        await query.edit_message_text(
+            INSTRUCCIONES_TEXTO, parse_mode="Markdown",
+            reply_markup=_menu_back("menu_main"),
         )
         return
 
