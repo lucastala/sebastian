@@ -1258,8 +1258,8 @@ async def _transcribe_voice(voice_bytes: bytes) -> str:
     return result.text
 
 
-async def _extract_ticket(image_bytes: bytes) -> dict:
-    """Read a receipt photo with vision and return {monto, categoria, descripcion, fecha}."""
+async def _interpret_photo(image_bytes: bytes) -> dict:
+    """Look at a photo, classify it (gasto/tarea/evento/texto) and extract the relevant fields."""
     today = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
     b64 = base64.b64encode(image_bytes).decode()
     resp = await openai_client.chat.completions.create(
@@ -1268,18 +1268,26 @@ async def _extract_ticket(image_bytes: bytes) -> dict:
             {
                 "role": "system",
                 "content": (
-                    "Sos un extractor de datos de tickets y comprobantes de compra. "
-                    "Devolvé SOLO un JSON con las claves: monto (number, el total pagado), "
-                    f"categoria (una de: {', '.join(EXPENSE_CATEGORIES)}), "
-                    "descripcion (string corta, ej. el comercio o lo comprado), "
-                    "fecha (YYYY-MM-DD; si no se ve, usá " + today + "). "
-                    "Si no podés leer el monto total, poné monto = 0."
+                    "Interpretás una foto y decidís qué acción corresponde. Devolvé SOLO un JSON.\n"
+                    "Clave 'tipo', uno de:\n"
+                    "- 'gasto': ticket, comprobante, factura o recibo de una compra.\n"
+                    "- 'tarea': lista o nota (manuscrita o no) de cosas para hacer / pendientes.\n"
+                    "- 'evento': invitación, flyer o nota con fecha y/u hora de un evento.\n"
+                    "- 'texto': cualquier otra cosa (captura de chat, email, documento).\n\n"
+                    "Si tipo='gasto': agregá monto (number, el total), categoria (una de: "
+                    f"{', '.join(EXPENSE_CATEGORIES)}), descripcion (string corta), "
+                    f"fecha (YYYY-MM-DD; si no se ve, usá {today}).\n"
+                    "Si tipo='tarea': agregá tareas = lista de objetos "
+                    "{tarea: string, fecha: 'YYYY-MM-DD' o null}.\n"
+                    "Si tipo='evento': agregá nombre (string), evento_fecha (YYYY-MM-DD), "
+                    "hora ('HH:MM' o null).\n"
+                    "Si tipo='texto': agregá texto = un resumen o transcripción breve de la imagen."
                 ),
             },
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Extraé los datos de este ticket."},
+                    {"type": "text", "text": "¿Qué es esta imagen y qué acción corresponde?"},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
                 ],
             },
@@ -1822,18 +1830,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"✅ Enviado a {sent} usuarios. Fallidos: {failed}.")
 
 
-async def _handle_ticket_photo(update: Update, user: dict) -> None:
-    message = update.message
-    try:
-        photo = message.photo[-1]  # highest resolution
-        photo_file = await photo.get_file()
-        raw = await photo_file.download_as_bytearray()
-        data = await _extract_ticket(bytes(raw))
-    except Exception as e:
-        logger.error(f"Ticket photo error for user {user['chat_id']}: {e}")
-        await message.reply_text("⚠️ No pude procesar la foto del ticket. Intente de nuevo.")
-        return
-
+async def _photo_gasto(message, user: dict, data: dict) -> None:
     try:
         monto = float(data.get("monto") or 0)
     except (ValueError, TypeError):
@@ -1849,9 +1846,7 @@ async def _handle_ticket_photo(update: Update, user: dict) -> None:
     if categoria not in EXPENSE_CATEGORIES:
         categoria = "Otros"
     descripcion = (data.get("descripcion") or "ticket").strip()
-    fecha = data.get("fecha")
-
-    ok = await add_expense(user, monto, categoria, descripcion, fecha)
+    ok = await add_expense(user, monto, categoria, descripcion, data.get("fecha"))
     if not ok:
         await message.reply_text("⚠️ Leí el ticket pero no pude guardar el gasto. Intente de nuevo.")
         return
@@ -1860,15 +1855,86 @@ async def _handle_ticket_photo(update: Update, user: dict) -> None:
     texto = (
         "✅ Gasto registrado desde el ticket:\n"
         f"{emoji} *{categoria}* — {_fmt_money(monto)}\n"
-        f"_{descripcion}_\n\n"
-        "Si algo no está bien, dígame (ej. \"cambiá el monto del 1 a 4500\")."
+        f"_{descripcion}_"
     )
     try:
         await message.reply_text(texto, parse_mode="Markdown")
     except Exception:
-        await message.reply_text(
-            f"✅ Gasto registrado: {categoria} — {_fmt_money(monto)} ({descripcion})"
-        )
+        await message.reply_text(f"✅ Gasto registrado: {categoria} — {_fmt_money(monto)} ({descripcion})")
+
+
+async def _photo_tareas(message, user: dict, data: dict) -> None:
+    items = data.get("tareas") or []
+    added = []
+    for it in items:
+        tarea = str(it.get("tarea", "")).strip()
+        if not tarea:
+            continue
+        task_id = await add_task(user, tarea)
+        if task_id and it.get("fecha"):
+            await update_task_fecha(user, task_id, it["fecha"])
+        if task_id:
+            added.append(tarea)
+    if not added:
+        await message.reply_text("📷 Vi una nota pero no pude identificar tareas. ¿Me las dice?")
+        return
+    lines = "\n".join(f"• {a}" for a in added)
+    footer = await build_tasks_footer(user)
+    await message.reply_text(
+        f"✅ Agregué {len(added)} tarea(s) desde la foto:\n{lines}\n\n{footer}",
+        parse_mode="Markdown",
+    )
+
+
+async def _photo_evento(message, user: dict, data: dict) -> None:
+    nombre = data.get("nombre") or "Evento"
+    fecha = data.get("evento_fecha")
+    hora = data.get("hora")
+    if not fecha:
+        await message.reply_text("📷 Vi un evento pero no pude leer la fecha. ¿Me la dice?")
+        return
+    try:
+        await create_event(user, nombre, fecha, hora)
+    except Exception as e:
+        logger.error(f"Photo event create error for {user['chat_id']}: {e}")
+        await message.reply_text("⚠️ No pude crear el evento desde la foto.")
+        return
+    cuando = _format_fecha(fecha) + (f" a las {hora}" if hora else "")
+    try:
+        await message.reply_text(f"✅ Evento creado desde la foto: *{nombre}* — {cuando}", parse_mode="Markdown")
+    except Exception:
+        await message.reply_text(f"✅ Evento creado: {nombre} — {cuando}")
+
+
+async def _handle_photo(update: Update, user: dict) -> None:
+    message = update.message
+    try:
+        photo = message.photo[-1]  # highest resolution
+        photo_file = await photo.get_file()
+        raw = await photo_file.download_as_bytearray()
+        data = await _interpret_photo(bytes(raw))
+    except Exception as e:
+        logger.error(f"Photo error for user {user['chat_id']}: {e}")
+        await message.reply_text("⚠️ No pude procesar la foto. Intente de nuevo.")
+        return
+
+    tipo = str(data.get("tipo", "")).lower()
+    if tipo == "gasto":
+        await _photo_gasto(message, user, data)
+    elif tipo == "tarea":
+        await _photo_tareas(message, user, data)
+    elif tipo == "evento":
+        await _photo_evento(message, user, data)
+    else:
+        texto = str(data.get("texto", "")).strip()
+        if texto:
+            cuerpo = f"📷 Esto dice la imagen:\n\n{texto}\n\n¿Desea que haga algo con esto?"
+            try:
+                await message.reply_text(cuerpo)
+            except Exception:
+                await message.reply_text("📷 Leí la imagen. ¿Qué desea que haga con esto?")
+        else:
+            await message.reply_text("📷 No pude interpretar la imagen. ¿Me dice qué es?")
 
 
 # ── Main handlers ─────────────────────────────────────────────────────────────
@@ -1901,9 +1967,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await message.reply_chat_action("typing")
 
-    # Foto de un ticket/comprobante → registrar el gasto automáticamente
+    # Foto → la IA decide qué es (gasto, tarea, evento o texto) y actúa
     if message.photo:
-        await _handle_ticket_photo(update, user)
+        await _handle_photo(update, user)
         return
 
     if message.voice:
@@ -1939,7 +2005,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "• /menu → abrir el menú (gastos, tareas, eventos)\n"
             "• 'gasté 5000 en el super' → registrar un gasto\n"
             "• 'cobré 150000' → registrar un ingreso\n"
-            "• Foto de un ticket 📷 → registro el gasto solo\n"
+            "• Foto 📷 → interpreto ticket, nota de tareas o evento\n"
             "• 'qué tengo hoy' → ver eventos del día\n"
             "• 'crear reunión el viernes a las 10' → agregar evento\n"
             "• Audio de voz 🎤 → lo transcribo y proceso\n\n"
