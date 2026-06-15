@@ -302,6 +302,15 @@ def _is_expense_delete_intent(text: str) -> bool:
     return has_verb and "gasto" in t and bool(re.search(r"\d", t))
 
 
+def _is_task_delete_intent(text: str) -> bool:
+    t = text.lower()
+    if "gasto" in t or "fijo" in t or "evento" in t:
+        return False
+    has_verb = any(v in t for v in _EXPENSE_DELETE_VERBS)
+    has_task = "tarea" in t or "tareas" in t
+    return has_verb and has_task and bool(re.search(r"\d", t))
+
+
 def _is_expense_edit_intent(text: str) -> bool:
     t = text.lower()
     if "fijo" in t:
@@ -342,6 +351,10 @@ _PRONOUN_DELETE_FORMS = (
 
 def _is_pronoun_delete(text: str) -> bool:
     t = text.lower()
+    # If it names an explicit object + number (e.g. "las tareas 14 y 8"), it's not
+    # an ambiguous bare pronoun — let the specific delete intents handle it.
+    if re.search(r"\b(tareas?|gastos?|eventos?|reuni[óo]n)\b", t) and re.search(r"\d", t):
+        return False
     return any(f in t for f in _PRONOUN_DELETE_FORMS)
 
 
@@ -450,6 +463,29 @@ OPENAI_TOOLS = [
                     },
                 },
                 "required": ["tarea"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_task",
+            "description": (
+                "Elimina una o varias tareas pendientes por su NÚMERO en la lista (el mismo número "
+                "que ve el usuario). Usalo cuando pida borrar/eliminar/sacar tareas por su número. "
+                "Si pide eliminar varias, pasalas TODAS juntas en 'posiciones' (ej. [8, 14]). "
+                "Si dudás del número, usá get_pending_tasks (cada tarea trae su 'n')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "posiciones": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Números de las tareas a eliminar, ej. [8, 14]",
+                    },
+                },
+                "required": ["posiciones"],
             },
         },
     },
@@ -920,7 +956,23 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
             user, func_args["nombre"], func_args["fecha"], func_args.get("hora")
         )
     if func_name == "get_pending_tasks":
-        return await get_pending_tasks(user)
+        tasks = await get_pending_tasks(user)
+        # Return them numbered in the SAME order the user sees (canonical)
+        return [
+            {"n": i, "tarea": t.get("tarea", ""), "fecha": str(t.get("fecha", "")).strip()}
+            for i, t in enumerate(_sort_tasks(tasks), 1)
+        ]
+    if func_name == "delete_task":
+        positions = func_args.get("posiciones") or []
+        if not positions and "posicion" in func_args:
+            positions = [func_args["posicion"]]
+        # Delete from highest to lowest so earlier deletions don't shift the rest
+        eliminadas = []
+        for p in sorted({int(x) for x in positions}, reverse=True):
+            nombre = await delete_task_by_position(user, p)
+            if nombre:
+                eliminadas.append(nombre)
+        return {"ok": len(eliminadas) > 0, "eliminadas": eliminadas}
     if func_name == "add_task":
         task_id = await add_task(user, func_args["tarea"])
         if task_id and func_args.get("fecha"):
@@ -1072,9 +1124,16 @@ async def _call_openai(
             "Si menciona una fecha límite, calculala y pasala en formato YYYY-MM-DD. "
             "Si tiene una hora específica (ej. 'a las 10') o es una reunión/cita/turno, "
             "entonces es un EVENTO de calendario (create_event), no una tarea."
-            "\n\nREGLA PARA EDITAR TAREAS: "
-            "Cuando el usuario quiera renombrar o cambiar la fecha de una tarea, "
-            "usá update_task con su número de posición en la lista."
+            "\n\nREGLA PARA EDITAR/ELIMINAR TAREAS: "
+            "Para renombrar o cambiar la fecha de una tarea usá update_task con su número. "
+            "Para eliminar una tarea usá delete_task con su número. Los números son los que ve "
+            "el usuario; si dudás del número, llamá get_pending_tasks (cada tarea trae su campo 'n'). "
+            "Si el usuario pide eliminar varias (ej. 'borrá la 8 y la 14'), llamá delete_task una "
+            "vez por cada número."
+            "\n\nMUY IMPORTANTE SOBRE LA LISTA DE TAREAS: "
+            "NUNCA escribas vos la lista de tareas ni la numeres en tu respuesta; el sistema la "
+            "agrega automáticamente al final con el formato y la numeración correctos. "
+            "Vos solo confirmá brevemente la acción realizada."
             "\n\nREGLA PARA GASTOS: "
             "Si el usuario dice que YA gastó/pagó/compró algo (verbo en pasado, con un monto), "
             "registralo con add_expense e inferí la categoría, y guardá una descripción breve. "
@@ -1120,6 +1179,8 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "cancel_fixed_expense"}}
     elif _is_fixed_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_fixed_expense"}}
+    elif _is_task_delete_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "delete_task"}}
     elif _is_expense_delete_intent(text):
         tool_choice = {"type": "function", "function": {"name": "delete_expense"}}
     elif _is_expense_edit_intent(text):
@@ -1169,7 +1230,7 @@ async def _call_openai(
         func_args = json.loads(tc.function.arguments)
         logger.info(f"Tool call: {func_name}({func_args}) for user {chat_id}")
 
-        if func_name == "update_task":
+        if func_name in ("update_task", "delete_task"):
             show_tasks = True
 
         if func_name == "add_task":
