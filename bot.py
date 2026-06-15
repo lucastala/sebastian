@@ -31,6 +31,7 @@ from database import (
 from texts import INSTRUCCIONES_TEXTO
 from google_services import (
     GmailPermissionError,
+    GoogleAuthExpiredError,
     add_expense,
     add_fixed_expense,
     add_income,
@@ -885,6 +886,8 @@ def _build_calendar_keyboard(task_id: str, year: int, month: int) -> InlineKeybo
 async def build_tasks_footer(user: dict) -> str:
     try:
         tasks = await get_pending_tasks(user)
+    except GoogleAuthExpiredError:
+        return _session_expired_text(user["chat_id"])
     except Exception as e:
         logger.error(f"Error fetching tasks for user {user.get('chat_id')}: {e}")
         return "⚠️ No se pudieron cargar las tareas pendientes."
@@ -1713,6 +1716,9 @@ async def _route_text(
     show_tasks = False
     try:
         reply, keyboard, show_tasks = await _call_openai(user, text)
+    except GoogleAuthExpiredError:
+        await message.reply_text(_session_expired_text(user["chat_id"]))
+        return
     except GmailPermissionError:
         reply = _gmail_reauth_text(user["chat_id"])
         keyboard = None
@@ -1793,6 +1799,13 @@ def _gmail_reauth_text(chat_id: int) -> str:
     return (
         "⚠️ Su cuenta todavía no tiene permisos de Gmail. "
         "Necesita reautorizar para activar esta función:\n\n"
+        f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+    )
+
+
+def _session_expired_text(chat_id: int) -> str:
+    return (
+        "⚠️ Su sesión de Google expiró. Reconecte su cuenta (sus datos no se borran):\n\n"
         f"{BASE_URL}/oauth/start?chat_id={chat_id}"
     )
 

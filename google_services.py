@@ -9,6 +9,7 @@ from typing import Optional
 
 import gspread
 from dotenv import load_dotenv
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -16,6 +17,11 @@ from googleapiclient.errors import HttpError
 
 
 class GmailPermissionError(Exception):
+    pass
+
+
+class GoogleAuthExpiredError(Exception):
+    """The user's Google session expired/was revoked — they must re-authorize."""
     pass
 
 load_dotenv()
@@ -51,7 +57,11 @@ async def refresh_user_credentials(user: dict) -> Credentials:
 
     if not creds.valid:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, lambda: creds.refresh(Request()))
+        try:
+            await loop.run_in_executor(None, lambda: creds.refresh(Request()))
+        except RefreshError as e:
+            # Refresh token expired or revoked (e.g. 7-day limit in Testing mode)
+            raise GoogleAuthExpiredError() from e
 
         from database import update_user_tokens
 
