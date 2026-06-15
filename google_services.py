@@ -872,6 +872,191 @@ async def log_due_fixed_expenses(user: dict, today: datetime) -> list[dict]:
     return await loop.run_in_executor(None, _run)
 
 
+# ── Deudas ────────────────────────────────────────────────────────────────────
+
+DEBT_HEADERS = ["persona", "monto", "tipo", "fecha"]
+
+
+def _get_deudas_ws(sh):
+    try:
+        return sh.worksheet("Deudas")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Deudas", rows=500, cols=len(DEBT_HEADERS))
+        ws.append_row(DEBT_HEADERS)
+        return ws
+
+
+async def add_debt(
+    user: dict, persona: str, monto: float, tipo: str = "debo", fecha: str | None = None
+) -> bool:
+    """tipo: 'debo' (el usuario debe) o 'me_deben' (le deben al usuario)."""
+    if not user.get("sheets_id"):
+        return False
+    creds = await refresh_user_credentials(user)
+    fecha = fecha or datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+    tipo = "me_deben" if tipo == "me_deben" else "debo"
+    loop = asyncio.get_running_loop()
+
+    def _add():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        ws = _get_deudas_ws(sh)
+        ws.append_row([persona, monto, tipo, fecha])
+        return True
+
+    return await loop.run_in_executor(None, _add)
+
+
+async def get_debts(user: dict) -> dict:
+    empty = {"deudas": [], "total_debo": 0.0, "total_me_deben": 0.0}
+    if not user.get("sheets_id"):
+        return empty
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _get():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Deudas")
+        except gspread.WorksheetNotFound:
+            return empty
+        deudas, total_debo, total_me = [], 0.0, 0.0
+        for i, r in enumerate(ws.get_all_records(), 1):
+            m = _parse_monto(r.get("monto"))
+            tipo = str(r.get("tipo", "debo")).strip()
+            deudas.append({"n": i, "persona": r.get("persona", ""), "monto": m, "tipo": tipo})
+            if tipo == "me_deben":
+                total_me += m
+            else:
+                total_debo += m
+        return {"deudas": deudas, "total_debo": total_debo, "total_me_deben": total_me}
+
+    return await loop.run_in_executor(None, _get)
+
+
+async def settle_debt(user: dict, posiciones: list[int]) -> list[str]:
+    """Remove (settle) debts by their number. Returns the names settled."""
+    if not user.get("sheets_id"):
+        return []
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _settle():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Deudas")
+        except gspread.WorksheetNotFound:
+            return []
+        records = ws.get_all_records()
+        saldadas = []
+        for p in sorted({int(x) for x in posiciones}, reverse=True):
+            if 1 <= p <= len(records):
+                saldadas.append(str(records[p - 1].get("persona", "")))
+                ws.delete_rows(p + 1)  # +1 for header
+        return saldadas
+
+    return await loop.run_in_executor(None, _settle)
+
+
+# ── Lista de supermercado ─────────────────────────────────────────────────────
+
+SUPER_HEADERS = ["item", "fecha"]
+
+
+def _get_super_ws(sh):
+    try:
+        return sh.worksheet("Supermercado")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Supermercado", rows=500, cols=len(SUPER_HEADERS))
+        ws.append_row(SUPER_HEADERS)
+        return ws
+
+
+async def add_super_item(user: dict, item: str) -> bool:
+    if not user.get("sheets_id"):
+        return False
+    creds = await refresh_user_credentials(user)
+    fecha = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+    loop = asyncio.get_running_loop()
+
+    def _add():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        ws = _get_super_ws(sh)
+        ws.append_row([item, fecha])
+        return True
+
+    return await loop.run_in_executor(None, _add)
+
+
+async def get_super_list(user: dict) -> list[dict]:
+    if not user.get("sheets_id"):
+        return []
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _get():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Supermercado")
+        except gspread.WorksheetNotFound:
+            return []
+        return [
+            {"n": i, "item": r.get("item", "")}
+            for i, r in enumerate(ws.get_all_records(), 1)
+        ]
+
+    return await loop.run_in_executor(None, _get)
+
+
+async def remove_super_items(user: dict, posiciones: list[int]) -> list[str]:
+    if not user.get("sheets_id"):
+        return []
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _remove():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Supermercado")
+        except gspread.WorksheetNotFound:
+            return []
+        records = ws.get_all_records()
+        quitados = []
+        for p in sorted({int(x) for x in posiciones}, reverse=True):
+            if 1 <= p <= len(records):
+                quitados.append(str(records[p - 1].get("item", "")))
+                ws.delete_rows(p + 1)
+        return quitados
+
+    return await loop.run_in_executor(None, _remove)
+
+
+async def clear_super_list(user: dict) -> int:
+    if not user.get("sheets_id"):
+        return 0
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _clear():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Supermercado")
+        except gspread.WorksheetNotFound:
+            return 0
+        n = len(ws.get_all_records())
+        if n:
+            ws.delete_rows(2, n + 1)
+        return n
+
+    return await loop.run_in_executor(None, _clear)
+
+
 # ── Gmail watch helper ────────────────────────────────────────────────────────
 
 async def get_emails_from_since(user: dict, email_address: str, since: datetime) -> list[dict]:

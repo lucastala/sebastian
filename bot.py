@@ -32,24 +32,31 @@ from texts import INSTRUCCIONES_TEXTO
 from google_services import (
     GmailPermissionError,
     GoogleAuthExpiredError,
+    add_debt,
     add_expense,
     add_fixed_expense,
     add_income,
+    add_super_item,
     add_task,
     cancel_fixed_expense,
+    clear_super_list,
     create_event,
     delete_event,
     delete_expense,
     delete_task_by_position,
     get_balance,
+    get_debts,
     get_events_by_date,
     get_expenses,
     get_fixed_expenses,
     get_pending_tasks,
+    get_super_list,
     get_today_events,
+    remove_super_items,
     search_emails,
     search_event,
     send_email,
+    settle_debt,
     update_event,
     update_expense_monto,
     update_task,
@@ -292,6 +299,52 @@ def _is_income_add_intent(text: str) -> bool:
 def _is_balance_intent(text: str) -> bool:
     t = text.lower()
     return any(p in t for p in _BALANCE_PHRASES)
+
+
+# ── Deudas ────────────────────────────────────────────────────────────────────
+_DEBT_QUERY_PHRASES = (
+    "mis deudas", "cuánto debo", "cuanto debo", "a quién le debo", "a quien le debo",
+    "quién me debe", "quien me debe", "qué deudas", "que deudas", "cuánto me deben",
+    "cuanto me deben", "ver deudas", "ver mis deudas", "mostrame las deudas", "lista de deudas",
+)
+_DEBT_ADD_PHRASES = ("le debo", "les debo", "yo debo", "me debe", "me deben", "le debe")
+
+
+def _is_debt_query_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _DEBT_QUERY_PHRASES)
+
+
+def _is_debt_add_intent(text: str) -> bool:
+    t = text.lower()
+    has = any(p in t for p in _DEBT_ADD_PHRASES) or bool(re.search(r"\bdebo\s", t))
+    return has and bool(re.search(r"\d", t))
+
+
+# ── Lista de supermercado ─────────────────────────────────────────────────────
+_SUPER_WORDS = ("súper", "super", "supermercado", "lista de compras", "lista de la compra")
+_SUPER_ADD_VERBS = (
+    "agregá", "agrega", "agregame", "anotá", "anota", "anotame", "sumá", "suma", "sumame",
+    "poné", "pone", "ponme", "añadí", "añade", "comprar", "comprá", "comprame", "falta", "necesito",
+)
+_SUPER_QUERY_PHRASES = (
+    "lista del súper", "lista del super", "lista de compras", "lista de la compra",
+    "qué tengo que comprar", "que tengo que comprar", "qué falta comprar", "que falta comprar",
+    "mostrame la lista del súper", "mostrame la lista del super", "ver la lista del súper",
+    "qué hay en el súper", "que hay en el super",
+)
+
+
+def _is_super_query_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _SUPER_QUERY_PHRASES)
+
+
+def _is_super_add_intent(text: str) -> bool:
+    t = text.lower()
+    if not any(w in t for w in _SUPER_WORDS):
+        return False
+    return any(v in t for v in _SUPER_ADD_VERBS)
 
 
 def _is_expense_delete_intent(text: str) -> bool:
@@ -848,6 +901,108 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_debt",
+            "description": (
+                "Registra una deuda. Usalo cuando el usuario diga que LE DEBE plata a alguien "
+                "('le debo 30000 a Vero', 'debo 5000 a Juan') → tipo='debo'; o que alguien le debe "
+                "('Caro me debe 4000', 'me deben 2000') → tipo='me_deben'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "persona": {"type": "string", "description": "Nombre de la persona"},
+                    "monto": {"type": "number", "description": "Monto en pesos"},
+                    "tipo": {"type": "string", "enum": ["debo", "me_deben"],
+                             "description": "'debo' si el usuario debe, 'me_deben' si le deben"},
+                },
+                "required": ["persona", "monto", "tipo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_debts",
+            "description": "Lista las deudas del usuario (lo que debe y lo que le deben) con los totales.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "settle_debt",
+            "description": (
+                "Salda (elimina) una o varias deudas por su NÚMERO en la lista. Usalo cuando el "
+                "usuario diga que pagó/saldó una deuda o que ya le pagaron. Pasá los números en "
+                "'posiciones' (ej. [1, 3])."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "posiciones": {"type": "array", "items": {"type": "integer"},
+                                   "description": "Números de las deudas a saldar"},
+                },
+                "required": ["posiciones"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_super_item",
+            "description": (
+                "Agrega un producto a la lista de supermercado/compras. Usalo cuando el usuario pida "
+                "agregar algo a la lista del súper o de compras ('agregá leche a la lista del súper', "
+                "'para el súper: pan y huevos'). Si menciona varios productos, llamá la función una "
+                "vez por cada producto."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item": {"type": "string", "description": "Producto a agregar"},
+                },
+                "required": ["item"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_super_list",
+            "description": "Muestra la lista de supermercado/compras del usuario, numerada.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_super_items",
+            "description": (
+                "Quita uno o varios productos de la lista del súper por su NÚMERO. Usalo cuando el "
+                "usuario diga que ya compró algo o quiere sacarlo de la lista. Pasá los números en "
+                "'posiciones'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "posiciones": {"type": "array", "items": {"type": "integer"},
+                                   "description": "Números de los productos a quitar"},
+                },
+                "required": ["posiciones"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_super_list",
+            "description": "Vacía por completo la lista de supermercado. Usalo cuando pida borrar/vaciar toda la lista.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
@@ -1068,6 +1223,27 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         return await get_balance(
             user, desde=func_args.get("desde"), hasta=func_args.get("hasta")
         )
+    if func_name == "add_debt":
+        ok = await add_debt(
+            user, func_args["persona"], func_args["monto"], func_args.get("tipo", "debo")
+        )
+        return {"ok": ok}
+    if func_name == "get_debts":
+        return await get_debts(user)
+    if func_name == "settle_debt":
+        saldadas = await settle_debt(user, func_args.get("posiciones", []))
+        return {"ok": len(saldadas) > 0, "saldadas": saldadas}
+    if func_name == "add_super_item":
+        ok = await add_super_item(user, func_args["item"])
+        return {"ok": ok, "item": func_args["item"]}
+    if func_name == "get_super_list":
+        return await get_super_list(user)
+    if func_name == "remove_super_items":
+        quitados = await remove_super_items(user, func_args.get("posiciones", []))
+        return {"ok": len(quitados) > 0, "quitados": quitados}
+    if func_name == "clear_super_list":
+        n = await clear_super_list(user)
+        return {"ok": True, "eliminados": n}
     return {"error": f"Función desconocida: {func_name}"}
 
 
@@ -1147,6 +1323,15 @@ async def _call_openai(
             "Si el usuario dice que YA cobró/le pagaron/recibió dinero (verbo en pasado, con monto), "
             "registralo con add_income. Si pregunta por su balance, saldo o cuánto le queda, usá "
             "get_balance calculando el período. El balance es ingresos menos gastos."
+            "\n\nREGLA PARA DEUDAS: "
+            "'le debo X a Y' → add_debt con tipo='debo'. 'Y me debe X' → add_debt con tipo='me_deben'. "
+            "Para ver deudas usá get_debts. Cuando pague o le paguen una deuda, usá settle_debt con "
+            "su número. NUNCA escribas vos la lista de deudas; el sistema la muestra."
+            "\n\nREGLA PARA LISTA DE SUPERMERCADO: "
+            "Para agregar productos a la lista del súper/compras usá add_super_item (uno por producto). "
+            "Para verla usá get_super_list, para quitar productos remove_super_items por número, y "
+            "clear_super_list para vaciarla. Diferenciá: 'comprar pan' sin contexto de súper es una "
+            "TAREA; 'agregá pan a la lista del súper' es la lista de compras."
             "\n\nREGLA PARA GASTOS FIJOS: "
             "Un gasto fijo es uno que se repite todos los meses (alquiler, seguro, patente, cuota "
             "de club, Netflix, etc.). Cuando el usuario lo declare ('el alquiler son 200000 por mes'), "
@@ -1171,6 +1356,14 @@ async def _call_openai(
             tool_choice = {"type": "function", "function": {"name": "delete_event"}}
         else:
             tool_choice = "auto"
+    elif _is_super_query_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "get_super_list"}}
+    elif _is_super_add_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_super_item"}}
+    elif _is_debt_query_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "get_debts"}}
+    elif _is_debt_add_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_debt"}}
     elif _is_task_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_task"}}
     elif _is_fixed_query_intent(text):
@@ -1452,6 +1645,8 @@ def _build_main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💸 Gastos", callback_data="menu_gastos")],
         [InlineKeyboardButton("🔁 Gastos fijos", callback_data="menu_fijos")],
         [InlineKeyboardButton("💰 Balance del mes", callback_data="menu_balance")],
+        [InlineKeyboardButton("💳 Deudas", callback_data="menu_deudas")],
+        [InlineKeyboardButton("🛒 Lista del súper", callback_data="menu_super")],
         [InlineKeyboardButton("📋 Tareas", callback_data="menu_tareas")],
         [InlineKeyboardButton("📅 Eventos de hoy", callback_data="menu_hoy")],
         [InlineKeyboardButton("📧 Correos vigilados", callback_data="menu_mails")],
@@ -1562,6 +1757,56 @@ def _format_balance(bal: dict) -> str:
     )
 
 
+def _format_deudas(data: dict) -> str:
+    deudas = data.get("deudas", [])
+    if not deudas:
+        return "💳 *Deudas*\n\nNo tiene deudas registradas."
+    lines = ["💳 *Deudas:*\n"]
+    for d in deudas:
+        if str(d.get("tipo")) == "me_deben":
+            lines.append(f"{d['n']}. {d['persona']} le debe — {_fmt_money(d['monto'])}")
+        else:
+            lines.append(f"{d['n']}. Debe a {d['persona']} — {_fmt_money(d['monto'])}")
+    lines.append(
+        f"\n🔴 Debe en total: {_fmt_money(data.get('total_debo', 0))}"
+        f"\n🟢 Le deben: {_fmt_money(data.get('total_me_deben', 0))}"
+    )
+    return "\n".join(lines)
+
+
+def _build_deudas_menu(data: dict) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            f"✅ Saldar {d['n']} — {d['persona']} {_fmt_money(d['monto'])}",
+            callback_data=f"menu_deudadel_{d['n']}",
+        )]
+        for d in data.get("deudas", [])
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _format_super(items: list[dict]) -> str:
+    if not items:
+        return "🛒 *Lista del súper*\n\nLa lista está vacía."
+    lines = ["🛒 *Lista del súper:*\n"]
+    for it in items:
+        lines.append(f"{it['n']}. {it['item']}")
+    lines.append("\nToque un producto abajo para quitarlo.")
+    return "\n".join(lines)
+
+
+def _build_super_menu(items: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"🗑️ {it['item']}", callback_data=f"menu_superdel_{it['n']}")]
+        for it in items
+    ]
+    if items:
+        rows.append([InlineKeyboardButton("🧹 Vaciar lista", callback_data="menu_superclear")])
+    rows.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _format_today_events(events: list[dict]) -> str:
     if not events:
         return "📅 No tiene eventos para hoy."
@@ -1624,6 +1869,46 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         bal = await get_balance(user, desde=desde, hasta=hasta)
         await query.edit_message_text(
             _format_balance(bal), parse_mode="Markdown", reply_markup=_menu_back("menu_main"),
+        )
+        return
+
+    if data == "menu_deudas":
+        deudas = await get_debts(user)
+        await query.edit_message_text(
+            _format_deudas(deudas), parse_mode="Markdown", reply_markup=_build_deudas_menu(deudas),
+        )
+        return
+
+    if data.startswith("menu_deudadel_"):
+        n = int(data.rsplit("_", 1)[1])
+        await settle_debt(user, [n])
+        deudas = await get_debts(user)
+        await query.edit_message_text(
+            _format_deudas(deudas), parse_mode="Markdown", reply_markup=_build_deudas_menu(deudas),
+        )
+        return
+
+    if data == "menu_super":
+        items = await get_super_list(user)
+        await query.edit_message_text(
+            _format_super(items), parse_mode="Markdown", reply_markup=_build_super_menu(items),
+        )
+        return
+
+    if data.startswith("menu_superdel_"):
+        n = int(data.rsplit("_", 1)[1])
+        await remove_super_items(user, [n])
+        items = await get_super_list(user)
+        await query.edit_message_text(
+            _format_super(items), parse_mode="Markdown", reply_markup=_build_super_menu(items),
+        )
+        return
+
+    if data == "menu_superclear":
+        await clear_super_list(user)
+        items = await get_super_list(user)
+        await query.edit_message_text(
+            _format_super(items), parse_mode="Markdown", reply_markup=_build_super_menu(items),
         )
         return
 
