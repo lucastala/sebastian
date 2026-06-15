@@ -65,6 +65,9 @@ logger = logging.getLogger(__name__)
 
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Chat/vision model — change here to swap models everywhere
+CHAT_MODEL = "gpt-4.1-mini"
+
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "https://tu-link-de-pago.com")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 ARGENTINA_TZ = timezone(timedelta(hours=-3))
@@ -1141,7 +1144,7 @@ async def _call_openai(
     logger.info(f"tool_choice={tool_choice!r} for: {text[:60]!r}")
 
     response = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=CHAT_MODEL,
         messages=messages,
         tools=OPENAI_TOOLS,
         tool_choice=tool_choice,
@@ -1274,7 +1277,7 @@ async def _call_openai(
             })
 
     final = await openai_client.chat.completions.create(
-        model="gpt-4o-mini", messages=messages
+        model=CHAT_MODEL, messages=messages
     )
     reply = final.choices[0].message.content or "Listo."
     _add_to_history(chat_id, text, reply)
@@ -1295,7 +1298,7 @@ async def _interpret_photo(image_bytes: bytes) -> dict:
     today = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
     b64 = base64.b64encode(image_bytes).decode()
     resp = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=CHAT_MODEL,
         messages=[
             {
                 "role": "system",
