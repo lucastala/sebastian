@@ -101,6 +101,15 @@ MAX_HISTORY_EXCHANGES = 8  # 8 user+assistant pairs = 16 messages
 # Pending event creates waiting for conflict confirmation
 _pending_event_creates: dict[int, dict] = {}
 
+# Chats currently in "add to supermarket list" mode (everything they send is an item)
+_super_add_mode: set[int] = set()
+
+
+def _split_items(text: str) -> list[str]:
+    """Split a free-form list into items (by line, comma or 'y')."""
+    parts = re.split(r"[,\n]+|\s+y\s+|\s+e\s+", text)
+    return [p.strip(" -•*\t") for p in parts if p.strip(" -•*\t")]
+
 
 def _within_minutes(inicio: str, target: datetime, window: timedelta) -> bool:
     try:
@@ -1797,7 +1806,8 @@ def _format_super(items: list[dict]) -> str:
 
 
 def _build_super_menu(items: list[dict]) -> InlineKeyboardMarkup:
-    rows = [
+    rows = [[InlineKeyboardButton("➕ Agregar productos", callback_data="menu_superadd")]]
+    rows += [
         [InlineKeyboardButton(f"🗑️ {it['item']}", callback_data=f"menu_superdel_{it['n']}")]
         for it in items
     ]
@@ -1892,6 +1902,28 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         items = await get_super_list(user)
         await query.edit_message_text(
             _format_super(items), parse_mode="Markdown", reply_markup=_build_super_menu(items),
+        )
+        return
+
+    if data == "menu_superadd":
+        _super_add_mode.add(chat_id)
+        await query.message.reply_text(
+            "🛒 *Modo lista del súper activado.*\n"
+            "Mandame los productos (uno por línea o separados por coma) y los voy agregando. "
+            "Puede pegar un listado entero.\n\nEscriba *listo* cuando termine.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Terminar", callback_data="menu_superdone")
+            ]]),
+        )
+        return
+
+    if data == "menu_superdone":
+        _super_add_mode.discard(chat_id)
+        items = await get_super_list(user)
+        await query.edit_message_text(
+            "✅ Listo.\n\n" + _format_super(items), parse_mode="Markdown",
+            reply_markup=_build_super_menu(items),
         )
         return
 
@@ -2000,6 +2032,33 @@ async def _route_text(
     update: Update, context: ContextTypes.DEFAULT_TYPE, user: dict, text: str
 ) -> None:
     message = update.message
+    chat_id = user["chat_id"]
+
+    # Supermarket "add mode" — everything sent is treated as items until "listo"
+    if chat_id in _super_add_mode:
+        if text.strip().lower() in (
+            "listo", "salir", "menu", "menú", "chau", "fin", "terminar", "ya está", "ya esta", "."
+        ):
+            _super_add_mode.discard(chat_id)
+            items = await get_super_list(user)
+            await message.reply_text(
+                "✅ Listo.\n\n" + _format_super(items),
+                parse_mode="Markdown", reply_markup=_build_super_menu(items),
+            )
+            return
+        nuevos = _split_items(text)
+        for it in nuevos:
+            await add_super_item(user, it)
+        added = "\n".join(f"• {n}" for n in nuevos) or "(nada)"
+        await message.reply_text(
+            f"✅ Agregué {len(nuevos)} a la lista del súper:\n{added}\n\n"
+            "Seguí mandando más o escribí *listo* para terminar.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Terminar", callback_data="menu_superdone")
+            ]]),
+        )
+        return
 
     if text.startswith("."):
         content = text[1:].strip()
@@ -2056,6 +2115,22 @@ async def _route_text(
     if _is_task_list_request(text):
         footer = await build_tasks_footer(user)
         await message.reply_text(footer, parse_mode="Markdown")
+        return
+
+    # Pedido de la lista del súper → mostrarla con botones (incluye "➕ Agregar")
+    if _is_super_query_intent(text):
+        items = await get_super_list(user)
+        await message.reply_text(
+            _format_super(items), parse_mode="Markdown", reply_markup=_build_super_menu(items),
+        )
+        return
+
+    # Pedido de deudas → mostrarlas con botones para saldar
+    if _is_debt_query_intent(text):
+        deudas = await get_debts(user)
+        await message.reply_text(
+            _format_deudas(deudas), parse_mode="Markdown", reply_markup=_build_deudas_menu(deudas),
+        )
         return
 
     # OpenAI function calling
