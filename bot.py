@@ -285,7 +285,10 @@ _TASK_LIST_PHRASES = (
 
 
 def _is_task_list_request(text: str) -> bool:
-    t = text.lower()
+    t = text.lower().strip().strip(".!?¿¡ ")
+    # A message that is essentially just "tareas"/"lista"/"pendientes" = show the list
+    if t in ("tareas", "tarea", "lista", "pendientes", "pendiente", "mis pendientes"):
+        return True
     if "gasto" in t or "fijo" in t:
         return False
     # "agregame en la lista de tareas X" is an ADD, not a request to view the list
