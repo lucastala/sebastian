@@ -20,17 +20,13 @@ from telegram.ext import (
 )
 
 from database import (
-    add_email_watch,
     create_user,
     get_active_users,
-    get_email_watches,
     get_user,
-    remove_email_watch,
     update_user_genero,
 )
 from texts import INSTRUCCIONES_TEXTO
 from google_services import (
-    GmailPermissionError,
     GoogleAuthExpiredError,
     add_debt,
     add_expense,
@@ -53,9 +49,7 @@ from google_services import (
     get_super_list,
     get_today_events,
     remove_super_items,
-    search_emails,
     search_event,
-    send_email,
     settle_debt,
     update_event,
     update_expense_monto,
@@ -142,22 +136,6 @@ _EDIT_TASK_PHRASES = ("cambiá la tarea", "cambia la tarea", "editá la tarea", 
 _EDIT_EVENT_STEMS = ("cambiá el evento", "cambia el evento", "editá el evento", "edita el evento",
                      "cambiá la reunión", "cambia la reunión", "cambiá la hora", "cambia la hora",
                      "pasá el evento", "mové el evento", "cambiá el turno", "cambia el turno")
-_WATCH_EMAIL_PHRASES = (
-    "avisame cuando", "avísame cuando", "avisame si", "avísame si",
-    "avisame cada vez", "avísame cada vez",
-    "notificame cuando", "notifícame cuando", "notificame si", "notifícame si",
-    "notificame cada vez", "notifícame cada vez",
-    "vigilá los mails", "vigila los mails", "vigilá el mail", "vigila el mail",
-    "vigilá los correos", "vigila los correos",
-    "cuando me llegue un mail", "cuando llegue un mail",
-    "cuando me escriba", "si me escribe",
-)
-_UNWATCH_EMAIL_PHRASES = (
-    "dejá de vigilar", "deja de vigilar",
-    "ya no me avises", "dejá de avisarme",
-    "sacá la vigilancia", "saca la vigilancia",
-    "stop vigilar",
-)
 _EXPENSE_ADD_STEMS = (
     "gasté", "gaste", "pagué", "pague", "compré", "compre",
     "me salió", "me salio", "me costó", "me costo", "gasto de",
@@ -231,22 +209,6 @@ def _is_task_edit_intent(text: str) -> bool:
 def _is_event_edit_intent(text: str) -> bool:
     t = text.lower()
     return any(p in t for p in _EDIT_EVENT_STEMS)
-
-
-def _is_watch_email_intent(text: str) -> bool:
-    t = text.lower()
-    if any(p in t for p in _WATCH_EMAIL_PHRASES):
-        return True
-    has_notify = any(w in t for w in ("avisame", "avísame", "notificame", "notifícame"))
-    has_mail = any(w in t for w in ("mail", "correo", "email"))
-    # dirección de email presente (tiene @)
-    has_at = "@" in t
-    return has_notify and (has_mail or has_at)
-
-
-def _is_unwatch_email_intent(text: str) -> bool:
-    t = text.lower()
-    return any(p in t for p in _UNWATCH_EMAIL_PHRASES)
 
 
 def _is_expense_query_intent(text: str) -> bool:
@@ -638,82 +600,6 @@ OPENAI_TOOLS = [
                     },
                 },
                 "required": ["posicion"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_emails",
-            "description": "Busca emails en Gmail por remitente, asunto o palabras clave.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Búsqueda de Gmail. Ej: 'from:banco@example.com', 'factura', 'subject:reunión'",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "send_email",
-            "description": "Redacta y envía un email desde la cuenta Gmail del usuario.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "to": {"type": "string", "description": "Dirección de destino"},
-                    "subject": {"type": "string", "description": "Asunto del email"},
-                    "body": {"type": "string", "description": "Cuerpo del email"},
-                },
-                "required": ["to", "subject", "body"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "watch_email",
-            "description": (
-                "Activa la vigilancia de una dirección de email: cuando llegue un mail de esa "
-                "dirección se le notifica al usuario automáticamente. "
-                "Usá esta función cuando el usuario pida 'avisame cuando me llegue un mail de X', "
-                "'vigilá los mails de X', 'notificame si X me escribe', etc."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "email_address": {
-                        "type": "string",
-                        "description": "Dirección de email a vigilar",
-                    },
-                },
-                "required": ["email_address"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "unwatch_email",
-            "description": (
-                "Desactiva la vigilancia de una dirección de email. "
-                "Usá esta función cuando el usuario pida 'dejá de vigilar X', "
-                "'ya no me avises de X', 'sacá la vigilancia de X', etc."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "email_address": {
-                        "type": "string",
-                        "description": "Dirección de email que se deja de vigilar",
-                    },
-                },
-                "required": ["email_address"],
             },
         },
     },
@@ -1163,17 +1049,6 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
             nueva_fecha=func_args.get("nueva_fecha"),
         )
         return {"ok": ok}
-    if func_name == "search_emails":
-        return await search_emails(user, func_args["query"])
-    if func_name == "send_email":
-        ok = await send_email(user, func_args["to"], func_args["subject"], func_args["body"])
-        return {"ok": ok}
-    if func_name == "watch_email":
-        ok = await add_email_watch(user["chat_id"], func_args["email_address"])
-        return {"ok": ok, "email": func_args["email_address"]}
-    if func_name == "unwatch_email":
-        ok = await remove_email_watch(user["chat_id"], func_args["email_address"])
-        return {"ok": ok, "email": func_args["email_address"]}
     if func_name == "add_expense":
         ok = await add_expense(
             user,
@@ -1396,10 +1271,6 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "update_task"}}
     elif _is_event_edit_intent(text):
         tool_choice = {"type": "function", "function": {"name": "update_event"}}
-    elif _is_watch_email_intent(text):
-        tool_choice = {"type": "function", "function": {"name": "watch_email"}}
-    elif _is_unwatch_email_intent(text):
-        tool_choice = {"type": "function", "function": {"name": "unwatch_email"}}
     elif _is_balance_intent(text):
         tool_choice = {"type": "function", "function": {"name": "get_balance"}}
     elif _is_income_add_intent(text):
@@ -1661,7 +1532,6 @@ def _build_main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🛒 Lista del súper", callback_data="menu_super")],
         [InlineKeyboardButton("📋 Tareas", callback_data="menu_tareas")],
         [InlineKeyboardButton("📅 Eventos de hoy", callback_data="menu_hoy")],
-        [InlineKeyboardButton("📧 Correos vigilados", callback_data="menu_mails")],
         [InlineKeyboardButton("📖 Instrucciones", callback_data="menu_help")],
         [InlineKeyboardButton("⚙️ Configuración", callback_data="menu_config")],
         [InlineKeyboardButton("✖️ Cerrar", callback_data="menu_close")],
@@ -1684,24 +1554,6 @@ def _build_gastos_cat_menu() -> InlineKeyboardMarkup:
 
 def _menu_back(target: str, label: str = "⬅️ Volver al menú") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=target)]])
-
-
-def _format_mails(watches: list[dict]) -> str:
-    if not watches:
-        return (
-            "📧 *Correos vigilados*\n\nNo está vigilando ningún correo.\n"
-            "Diga: \"avíseme cuando me llegue un mail de ...\""
-        )
-    return "📧 *Correos vigilados*\n\nToque uno para dejar de vigilarlo:"
-
-
-def _build_mails_menu(watches: list[dict]) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(f"🗑️ {w['email_address']}", callback_data=f"menu_maildel_{i}")]
-        for i, w in enumerate(watches)
-    ]
-    rows.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")])
-    return InlineKeyboardMarkup(rows)
 
 
 def _genero_label(user: dict) -> str:
@@ -1955,25 +1807,6 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if data == "menu_mails":
-        watches = await get_email_watches(chat_id)
-        await query.edit_message_text(
-            _format_mails(watches), parse_mode="Markdown",
-            reply_markup=_build_mails_menu(watches),
-        )
-        return
-
-    if data.startswith("menu_maildel_"):
-        idx = int(data.rsplit("_", 1)[1])
-        watches = await get_email_watches(chat_id)
-        if 0 <= idx < len(watches):
-            await remove_email_watch(chat_id, watches[idx]["email_address"])
-        watches = await get_email_watches(chat_id)
-        await query.edit_message_text(
-            _format_mails(watches), parse_mode="Markdown",
-            reply_markup=_build_mails_menu(watches),
-        )
-        return
 
     if data == "menu_help":
         await query.edit_message_text(
@@ -2143,9 +1976,6 @@ async def _route_text(
     except GoogleAuthExpiredError:
         await message.reply_text(_session_expired_text(user["chat_id"]))
         return
-    except GmailPermissionError:
-        reply = _gmail_reauth_text(user["chat_id"])
-        keyboard = None
     except Exception as e:
         logger.error(f"OpenAI error for user {user['chat_id']}: {e}")
         reply, keyboard = "⚠️ Tuve un error procesando su mensaje. Intente de nuevo.", None
@@ -2217,66 +2047,10 @@ async def handle_delete_event(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("⚠️ No se pudo eliminar el evento.")
 
 
-# ── Gmail re-auth helper ──────────────────────────────────────────────────────
-
-def _gmail_reauth_text(chat_id: int) -> str:
-    return (
-        "⚠️ Su cuenta todavía no tiene permisos de Gmail. "
-        "Necesita reautorizar para activar esta función:\n\n"
-        f"{BASE_URL}/oauth/start?chat_id={chat_id}"
-    )
-
-
 def _session_expired_text(chat_id: int) -> str:
     return (
         "⚠️ Su sesión de Google expiró. Reconecte su cuenta (sus datos no se borran):\n\n"
         f"{BASE_URL}/oauth/start?chat_id={chat_id}"
-    )
-
-
-# ── /vigilar command ──────────────────────────────────────────────────────────
-
-async def vigilar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    user = await get_user(chat_id)
-    if not user or not user.get("access_token"):
-        await update.message.reply_text("⚠️ Primero necesita conectar su cuenta de Google.")
-        return
-
-    if not context.args:
-        watches = await get_email_watches(chat_id)
-        if not watches:
-            await update.message.reply_text(
-                "No está vigilando ningún correo.\n\nUse: /vigilar correo@ejemplo.com"
-            )
-        else:
-            lines = ["📧 *Correos vigilados:*"]
-            for w in watches:
-                lines.append(f"• {w['email_address']}")
-            lines.append("\nUse /vigilar\\_stop correo@ejemplo.com para dejar de vigilar.")
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-        return
-
-    email_address = context.args[0].lower().strip()
-    ok = await add_email_watch(chat_id, email_address)
-    if ok:
-        await update.message.reply_text(
-            f"✅ Le avisaré cuando llegue un correo de *{email_address}*.",
-            parse_mode="Markdown",
-        )
-    else:
-        await update.message.reply_text("⚠️ No se pudo guardar. Intente de nuevo.")
-
-
-async def vigilar_stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    if not context.args:
-        await update.message.reply_text("Use: /vigilar_stop correo@ejemplo.com")
-        return
-    email_address = context.args[0].lower().strip()
-    await remove_email_watch(chat_id, email_address)
-    await update.message.reply_text(
-        f"✅ Dejé de vigilar *{email_address}*.", parse_mode="Markdown"
     )
 
 
@@ -2556,8 +2330,6 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("reconectar", reconectar_command))
-    app.add_handler(CommandHandler("vigilar", vigilar_command))
-    app.add_handler(CommandHandler("vigilar_stop", vigilar_stop_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE | filters.PHOTO, handle_message))

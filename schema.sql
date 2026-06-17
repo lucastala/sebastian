@@ -21,24 +21,6 @@ ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS genero TEXT;
 CREATE INDEX IF NOT EXISTS idx_usuarios_estado
     ON public.usuarios (estado_suscripcion);
 
--- Email watches table
-CREATE TABLE IF NOT EXISTS public.email_watches (
-    id            BIGSERIAL    PRIMARY KEY,
-    chat_id       BIGINT       NOT NULL REFERENCES public.usuarios(chat_id) ON DELETE CASCADE,
-    email_address TEXT         NOT NULL,
-    last_checked  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    UNIQUE(chat_id, email_address)
-);
-
--- RLS for email_watches — mirror the usuarios policy so the backend can write
-ALTER TABLE public.email_watches ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Service role full access watches"
-    ON public.email_watches
-    FOR ALL
-    USING (true)
-    WITH CHECK (true);
-
 -- Enable Row Level Security
 ALTER TABLE public.usuarios ENABLE ROW LEVEL SECURITY;
 

@@ -1,6 +1,8 @@
 # Sebastian SaaS — Asistente Personal en Telegram
 
-Bot de Telegram multiusuario en Python. Cada usuario conecta su propia cuenta de Google y tiene su Calendar, su Gmail y su Google Sheet personal.
+Bot de Telegram multiusuario en Python. Cada usuario conecta su propia cuenta de Google y tiene su Calendar y su Google Sheet personal.
+
+> Nota: el soporte de Gmail no está incluido en la v1 (se quitó para usar solo scopes sensibles y evitar la verificación restringida de Google). Podría sumarse en una v2.
 
 ---
 
@@ -12,7 +14,6 @@ Todo en lenguaje natural, sin comandos (salvo los atajos `.tarea` / `.N`):
 - **Calendario** — crear, buscar, editar y eliminar eventos; avisa si dos se pisan (< 30 min).
 - **Gastos** — registrar gastos con categoría automática y descripción; listar por período/categoría; editar el monto o eliminar.
 - **Gastos fijos** — declarar gastos mensuales recurrentes (alquiler, seguro, suscripciones…) que se cargan solos cada mes.
-- **Gmail** — buscar correos, redactar y enviar, y vigilar direcciones para avisar y resumir cuando llega un mail.
 - **Voz** — transcribe los audios con Whisper y los procesa como texto.
 
 Las 10 categorías de gasto: Supermercado, Restaurantes y delivery, Transporte, Vivienda, Salud, Ropa y calzado, Suscripciones, Entretenimiento, Trabajo, Otros.
@@ -62,7 +63,6 @@ Otros trabajos programados (`scheduler.py`):
 | Job | Frecuencia | Qué hace |
 |-----|-----------|----------|
 | Resumen diario | 8:00 AR | Eventos + tareas del día |
-| Vigilancia de mails | cada 5 min | Revisa las direcciones vigiladas y avisa/resume mails nuevos |
 | Gastos fijos | 9:00 AR | Carga los gastos fijos que vencen ese mes y avisa |
 
 ---
@@ -74,8 +74,8 @@ proyecto sebastian/
 ├── bot.py              ← lógica principal del bot
 ├── server.py           ← FastAPI para el callback de OAuth
 ├── database.py         ← funciones de Supabase
-├── google_services.py  ← Sheets, Calendar y Gmail por usuario
-├── scheduler.py        ← resumen diario 8am, vigilancia de mails (cada 5 min), gastos fijos (9am)
+├── google_services.py  ← Sheets y Calendar por usuario
+├── scheduler.py        ← resumen diario 8am, gastos fijos (9am), avisos de eventos
 ├── requirements.txt
 ├── schema.sql          ← SQL para crear la tabla en Supabase
 ├── .env                ← credenciales (no subir al repo)
@@ -104,13 +104,11 @@ proyecto sebastian/
    - Google Calendar API ✓
    - Google Sheets API ✓
    - Google Drive API ✓
-   - Gmail API ✓
 4. **APIs & Services → OAuth consent screen**:
    - User Type: **External**
    - Completar nombre de la app, email de soporte
-   - Scopes: agregar `calendar`, `spreadsheets`, `drive.file`, `userinfo.email`, `gmail.readonly`, `gmail.send`
+   - Scopes: agregar `calendar`, `spreadsheets`, `drive.file`, `userinfo.email` (todos sensibles, sin scopes restringidos → verificación gratuita)
    - En **Test users**: agregar los emails que van a usar el bot durante desarrollo
-   - Nota: los scopes de Gmail son sensibles; en desarrollo aparece el aviso de "app no verificada" (se continúa con *Configuración avanzada → Ir a la app*). Para producción requieren verificación de Google.
 5. **APIs & Services → Credentials → Create Credentials → OAuth client ID**:
    - Application type: **Web application**
    - Authorized redirect URIs: `http://localhost:8000/oauth/callback`
@@ -183,18 +181,8 @@ Ahora podés escribirle al bot. Al registrarte por primera vez el bot te manda u
 | `token_expiry` | TIMESTAMPTZ | Vencimiento del token |
 | `sheets_id` | TEXT | ID del Google Sheet del usuario |
 | `estado_suscripcion` | TEXT | `trial` / `activo` / `inactivo` |
+| `genero` | TEXT | Trato preferido: `m` (señor) / `f` (señora) |
 | `fecha_alta` | TIMESTAMPTZ | Fecha de registro |
-
-### Tabla `email_watches`
-
-Direcciones de correo que cada usuario vigila. Requiere su propia política RLS permisiva (ver `schema.sql`).
-
-| Columna | Tipo | Descripción |
-|---------|------|-------------|
-| `id` | BIGSERIAL PK | Identificador |
-| `chat_id` | BIGINT FK | Usuario que vigila (→ `usuarios`) |
-| `email_address` | TEXT | Dirección vigilada |
-| `last_checked` | TIMESTAMPTZ | Última revisión |
 
 > Importante: el backend usa la anon key, así que **RLS no se bypassa**. Toda tabla nueva necesita una política `FOR ALL USING (true) WITH CHECK (true)` y un `NOTIFY pgrst, 'reload schema';` tras crearla.
 
@@ -219,12 +207,11 @@ Direcciones de correo que cada usuario vigila. Requiere su propia política RLS 
 | `add_fixed_expense(nombre, monto, categoria, dia_del_mes?)` | Declara un gasto fijo mensual |
 | `get_fixed_expenses()` | Lista los gastos fijos activos |
 | `cancel_fixed_expense(nombre)` | Da de baja un gasto fijo |
-| `search_emails(query)` | Busca correos en Gmail |
-| `send_email(to, subject, body)` | Redacta y envía un correo |
-| `watch_email(email_address)` | Vigila una dirección y avisa cuando llega un mail |
-| `unwatch_email(email_address)` | Deja de vigilar una dirección |
+| `add_income / get_balance` | Ingresos y balance del período |
+| `add_debt / get_debts / settle_debt` | Deudas (debo / me deben) |
+| `add_super_item / get_super_list / remove_super_items / clear_super_list` | Lista de supermercado |
 
-> Para operaciones de estado (eliminar, editar, gastos, gastos fijos, vigilancia) el bot detecta la intención por palabras clave y **fuerza** el `tool_choice` correspondiente, porque gpt-4o-mini no llama estas funciones de forma confiable por sí solo.
+> Para operaciones de estado (eliminar, editar, gastos, etc.) el bot detecta la intención por palabras clave y **fuerza** el `tool_choice` correspondiente, porque el modelo no siempre llama estas funciones de forma confiable por sí solo.
 
 ---
 
@@ -262,12 +249,11 @@ Cada usuario tiene un Google Sheet propio con tres pestañas, creadas automátic
 | Componente | Tecnología |
 |------------|------------|
 | Bot | python-telegram-bot v21+ async |
-| IA | OpenAI gpt-4o-mini + function calling |
+| IA | OpenAI gpt-4.1-mini + function calling y visión |
 | Voz | OpenAI Whisper |
-| Tareas y gastos | Google Sheets (gspread) — una hoja por usuario (pestañas Tareas, Gastos, GastosFijos) |
+| Datos del usuario | Google Sheets (gspread) — una hoja por usuario (pestañas Tareas, Gastos, GastosFijos, Ingresos, Deudas, Supermercado) |
 | Calendario | Google Calendar API |
-| Correo | Gmail API (lectura y envío) |
-| Base de datos | Supabase (PostgreSQL) — usuarios y email_watches |
+| Base de datos | Supabase (PostgreSQL) — tabla usuarios |
 | Auth | Google OAuth 2.0 (google-auth-oauthlib) |
 | Scheduler | APScheduler AsyncIOScheduler |
 | Servidor OAuth | FastAPI + uvicorn |

@@ -6,10 +6,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
 
-from database import get_active_users, get_all_email_watches, get_user, update_watch_last_checked
+from database import get_active_users
 from google_services import (
-    GmailPermissionError,
-    get_emails_from_since,
     get_pending_tasks,
     get_today_events,
     log_due_fixed_expenses,
@@ -69,54 +67,6 @@ async def send_daily_summary(bot: Bot) -> None:
 
         except Exception as e:
             logger.error(f"Error sending summary to user {user['chat_id']}: {e}")
-
-
-async def check_email_watches(bot: Bot) -> None:
-    watches = await get_all_email_watches()
-    if not watches:
-        return
-
-    now = datetime.now(timezone.utc)
-    logger.info(f"Checking {len(watches)} email watches")
-
-    for watch in watches:
-        chat_id = watch["chat_id"]
-        email_address = watch["email_address"]
-        last_checked_str = watch.get("last_checked", now.isoformat())
-        try:
-            last_checked = datetime.fromisoformat(last_checked_str.replace("Z", "+00:00"))
-        except Exception:
-            last_checked = now
-
-        user = await get_user(chat_id)
-        if not user or not user.get("access_token"):
-            continue
-
-        try:
-            new_emails = await get_emails_from_since(user, email_address, last_checked)
-            for mail in new_emails:
-                header = (
-                    f"📧 *Nuevo mail de {email_address}*\n\n"
-                    f"*Asunto:* {mail['asunto']}\n"
-                    f"*De:* {mail['remitente']}\n\n"
-                )
-                snippet = mail["snippet"]
-                try:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=header + snippet,
-                        parse_mode="Markdown",
-                    )
-                except Exception:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=f"📧 Nuevo mail de {email_address}\n\nAsunto: {mail['asunto']}\nDe: {mail['remitente']}\n\n{snippet}",
-                    )
-            await update_watch_last_checked(chat_id, email_address, now)
-        except GmailPermissionError:
-            logger.warning(f"No Gmail permission for user {chat_id}")
-        except Exception as e:
-            logger.error(f"Error checking emails for {chat_id} / {email_address}: {e}")
 
 
 async def check_fixed_expenses(bot: Bot) -> None:
@@ -196,14 +146,6 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="daily_summary",
         name="Daily Morning Summary",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        check_email_watches,
-        IntervalTrigger(minutes=5),
-        args=[bot],
-        id="email_watches",
-        name="Email Watch Check",
         replace_existing=True,
     )
     scheduler.add_job(
