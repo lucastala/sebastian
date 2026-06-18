@@ -985,3 +985,141 @@ async def clear_super_list(user: dict) -> int:
         return n
 
     return await loop.run_in_executor(None, _clear)
+
+
+# ── Listados (listas con nombre) ──────────────────────────────────────────────
+
+LISTAS_HEADERS = ["lista", "item", "fecha"]
+
+
+def _get_listas_ws(sh):
+    try:
+        return sh.worksheet("Listados")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Listados", rows=2000, cols=len(LISTAS_HEADERS))
+        ws.append_row(LISTAS_HEADERS)
+        return ws
+
+
+def _norm_lista(s: str) -> str:
+    return str(s).strip().lower()
+
+
+async def add_list_items(user: dict, nombre: str, items: list[str]) -> int:
+    if not user.get("sheets_id") or not items:
+        return 0
+    creds = await refresh_user_credentials(user)
+    fecha = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+    loop = asyncio.get_running_loop()
+
+    def _add():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        ws = _get_listas_ws(sh)
+        ws.append_rows([[nombre.strip(), it, fecha] for it in items])
+        return len(items)
+
+    return await loop.run_in_executor(None, _add)
+
+
+async def get_list_items(user: dict, nombre: str) -> list[dict]:
+    if not user.get("sheets_id"):
+        return []
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _get():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Listados")
+        except gspread.WorksheetNotFound:
+            return []
+        out, i = [], 0
+        for r in ws.get_all_records():
+            if _norm_lista(r.get("lista", "")) == _norm_lista(nombre):
+                i += 1
+                out.append({"n": i, "item": r.get("item", "")})
+        return out
+
+    return await loop.run_in_executor(None, _get)
+
+
+async def get_list_names(user: dict) -> list[dict]:
+    """Distinct list names with item counts, in first-seen order."""
+    if not user.get("sheets_id"):
+        return []
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _get():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Listados")
+        except gspread.WorksheetNotFound:
+            return []
+        seen: dict[str, list] = {}
+        for r in ws.get_all_records():
+            name = str(r.get("lista", "")).strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key not in seen:
+                seen[key] = [name, 0]
+            seen[key][1] += 1
+        return [{"nombre": v[0], "items": v[1]} for v in seen.values()]
+
+    return await loop.run_in_executor(None, _get)
+
+
+async def remove_list_items(user: dict, nombre: str, posiciones: list[int]) -> list[str]:
+    if not user.get("sheets_id"):
+        return []
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _remove():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Listados")
+        except gspread.WorksheetNotFound:
+            return []
+        filtered = [
+            (idx + 2, r) for idx, r in enumerate(ws.get_all_records())
+            if _norm_lista(r.get("lista", "")) == _norm_lista(nombre)
+        ]
+        quitados = []
+        for p in sorted({int(x) for x in posiciones}, reverse=True):
+            if 1 <= p <= len(filtered):
+                row_idx, r = filtered[p - 1]
+                quitados.append(str(r.get("item", "")))
+                ws.delete_rows(row_idx)
+        return quitados
+
+    return await loop.run_in_executor(None, _remove)
+
+
+async def delete_list(user: dict, nombre: str) -> int:
+    if not user.get("sheets_id"):
+        return 0
+    creds = await refresh_user_credentials(user)
+    loop = asyncio.get_running_loop()
+
+    def _delete():
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(user["sheets_id"])
+        try:
+            ws = sh.worksheet("Listados")
+        except gspread.WorksheetNotFound:
+            return 0
+        rows = [
+            idx + 2 for idx, r in enumerate(ws.get_all_records())
+            if _norm_lista(r.get("lista", "")) == _norm_lista(nombre)
+        ]
+        for row_idx in sorted(rows, reverse=True):
+            ws.delete_rows(row_idx)
+        return len(rows)
+
+    return await loop.run_in_executor(None, _delete)

@@ -32,6 +32,7 @@ from google_services import (
     add_expense,
     add_fixed_expense,
     add_income,
+    add_list_items,
     add_super_item,
     add_task,
     cancel_fixed_expense,
@@ -39,15 +40,19 @@ from google_services import (
     create_event,
     delete_event,
     delete_expense,
+    delete_list,
     delete_task_by_position,
     get_balance,
     get_debts,
     get_events_by_date,
     get_expenses,
     get_fixed_expenses,
+    get_list_items,
+    get_list_names,
     get_pending_tasks,
     get_super_list,
     get_today_events,
+    remove_list_items,
     remove_super_items,
     search_event,
     settle_debt,
@@ -97,6 +102,12 @@ _pending_event_creates: dict[int, dict] = {}
 
 # Chats currently in "add to supermarket list" mode (everything they send is an item)
 _super_add_mode: set[int] = set()
+
+# Chats in "add to named list" mode → maps chat_id to the list name being filled
+_list_add_mode: dict[int, str] = {}
+
+# Chats that just tapped "Nuevo listado" and we're waiting for them to type the name
+_awaiting_list_name: set[int] = set()
 
 
 def _split_items(text: str) -> list[str]:
@@ -319,6 +330,35 @@ def _is_super_add_intent(text: str) -> bool:
     if not any(w in t for w in _SUPER_WORDS):
         return False
     return any(v in t for v in _SUPER_ADD_VERBS)
+
+
+# ── Listados con nombre ───────────────────────────────────────────────────────
+_LIST_CREATE_TRIGGERS = (
+    "armame un listado", "armame una lista", "armame la lista",
+    "armá un listado", "arma un listado", "armá una lista", "arma una lista",
+    "hacé un listado", "hace un listado", "hacé una lista", "hace una lista",
+    "nuevo listado", "nueva lista", "creá un listado", "crea un listado",
+    "creá una lista", "crea una lista", "cargá un listado", "empezá un listado",
+)
+_LISTS_QUERY_PHRASES = (
+    "mis listados", "qué listados", "que listados", "ver mis listados",
+    "mostrame mis listados", "cuáles son mis listados", "cuales son mis listados",
+    "mis listas", "ver listados",
+)
+
+
+def _is_list_create_intent(text: str) -> bool:
+    t = text.lower()
+    if any(w in t for w in ("súper", "super", "compras", "tarea")):
+        return False
+    return any(p in t for p in _LIST_CREATE_TRIGGERS)
+
+
+def _is_lists_query_intent(text: str) -> bool:
+    t = text.lower().strip().strip(".!?¿¡ ")
+    if t in ("listados", "mis listados"):
+        return True
+    return any(p in t for p in _LISTS_QUERY_PHRASES)
 
 
 def _is_expense_delete_intent(text: str) -> bool:
@@ -901,6 +941,80 @@ OPENAI_TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_to_list",
+            "description": (
+                "Agrega ítems a un listado con nombre (distinto del súper y de las tareas). "
+                "Usalo cuando el usuario pida armar/crear/agregar a un listado nombrado, ej. "
+                "'armame una lista de viaje con protector y ojotas', 'agregá pilas al listado de "
+                "la mudanza'. Si no da ítems todavía, igual creá el listado con items vacío y "
+                "pedile qué quiere agregar."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del listado (ej. viaje, mudanza, regalos)"},
+                    "items": {"type": "array", "items": {"type": "string"},
+                              "description": "Ítems a agregar (puede ser vacío)"},
+                },
+                "required": ["nombre", "items"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_list",
+            "description": "Muestra los ítems de un listado nombrado. Ej. 'mostrame el listado del viaje'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del listado a mostrar"},
+                },
+                "required": ["nombre"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_lists",
+            "description": "Lista los nombres de todos los listados del usuario con su cantidad de ítems.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_list_items",
+            "description": "Quita ítems de un listado nombrado, por su número. Pasá los números en 'posiciones'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del listado"},
+                    "posiciones": {"type": "array", "items": {"type": "integer"},
+                                   "description": "Números de los ítems a quitar"},
+                },
+                "required": ["nombre", "posiciones"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_list",
+            "description": "Borra por completo un listado nombrado. Usalo cuando pida eliminar/borrar todo el listado.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del listado a borrar"},
+                },
+                "required": ["nombre"],
+            },
+        },
+    },
 ]
 
 
@@ -1131,6 +1245,20 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
     if func_name == "clear_super_list":
         n = await clear_super_list(user)
         return {"ok": True, "eliminados": n}
+    if func_name == "add_to_list":
+        n = await add_list_items(user, func_args["nombre"], func_args.get("items", []))
+        return {"ok": True, "nombre": func_args["nombre"], "agregados": n}
+    if func_name == "get_list":
+        items = await get_list_items(user, func_args["nombre"])
+        return {"nombre": func_args["nombre"], "items": items}
+    if func_name == "get_lists":
+        return await get_list_names(user)
+    if func_name == "remove_list_items":
+        quitados = await remove_list_items(user, func_args["nombre"], func_args.get("posiciones", []))
+        return {"ok": len(quitados) > 0, "quitados": quitados}
+    if func_name == "delete_list":
+        n = await delete_list(user, func_args["nombre"])
+        return {"ok": n > 0, "eliminados": n}
     return {"error": f"Función desconocida: {func_name}"}
 
 
@@ -1219,6 +1347,12 @@ async def _call_openai(
             "Para verla usá get_super_list, para quitar productos remove_super_items por número, y "
             "clear_super_list para vaciarla. Diferenciá: 'comprar pan' sin contexto de súper es una "
             "TAREA; 'agregá pan a la lista del súper' es la lista de compras."
+            "\n\nREGLA PARA LISTADOS CON NOMBRE: "
+            "Son listas que el usuario nombra (viaje, mudanza, regalos, etc.), distintas del súper "
+            "y de las tareas. Para crearlas o agregarles ítems usá add_to_list (extraé el nombre y "
+            "los ítems del mensaje). Para ver una usá get_list, para ver todas get_lists, para quitar "
+            "ítems remove_list_items por número, y delete_list para borrar el listado completo. "
+            "Si te piden armar un listado pero no dan ítems, creá el listado y preguntá qué agregar."
             "\n\nREGLA PARA GASTOS FIJOS: "
             "Un gasto fijo es uno que se repite todos los meses (alquiler, seguro, patente, cuota "
             "de club, Netflix, etc.). Cuando el usuario lo declare ('el alquiler son 200000 por mes'), "
@@ -1247,6 +1381,10 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "get_super_list"}}
     elif _is_super_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_super_item"}}
+    elif _is_lists_query_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "get_lists"}}
+    elif _is_list_create_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_to_list"}}
     elif _is_debt_query_intent(text):
         tool_choice = {"type": "function", "function": {"name": "get_debts"}}
     elif _is_debt_add_intent(text):
@@ -1530,6 +1668,7 @@ def _build_main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💰 Balance del mes", callback_data="menu_balance")],
         [InlineKeyboardButton("💳 Deudas", callback_data="menu_deudas")],
         [InlineKeyboardButton("🛒 Lista del súper", callback_data="menu_super")],
+        [InlineKeyboardButton("📝 Listados", callback_data="menu_listados")],
         [InlineKeyboardButton("📋 Tareas", callback_data="menu_tareas")],
         [InlineKeyboardButton("📅 Eventos de hoy", callback_data="menu_hoy")],
         [InlineKeyboardButton("📖 Instrucciones", callback_data="menu_help")],
@@ -1672,6 +1811,47 @@ def _build_super_menu(items: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _format_lists(names: list[dict]) -> str:
+    if not names:
+        return "📝 *Listados*\n\nNo tiene listados todavía.\nDiga: \"armame una lista de viaje con ...\""
+    lines = ["📝 *Sus listados:*\n"]
+    for x in names:
+        lines.append(f"• {x['nombre']} ({x['items']})")
+    return "\n".join(lines)
+
+
+def _build_lists_menu(names: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"📝 {x['nombre']} ({x['items']})", callback_data=f"menu_lopen_{i}")]
+        for i, x in enumerate(names)
+    ]
+    rows.append([InlineKeyboardButton("➕ Nuevo listado", callback_data="menu_listnew")])
+    rows.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _format_list(nombre: str, items: list[dict]) -> str:
+    if not items:
+        return f"📝 *{nombre}*\n\nEl listado está vacío."
+    lines = [f"📝 *{nombre}:*\n"]
+    for it in items:
+        lines.append(f"{it['n']}. {it['item']}")
+    lines.append("\nToque un ítem para quitarlo, o ➕ para agregar.")
+    return "\n".join(lines)
+
+
+def _build_list_menu(idx: int, items: list[dict]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("➕ Agregar ítems", callback_data=f"menu_ladd_{idx}")]]
+    rows += [
+        [InlineKeyboardButton(f"🗑️ {it['item']}", callback_data=f"menu_lidel_{idx}_{it['n']}")]
+        for it in items
+    ]
+    if items:
+        rows.append([InlineKeyboardButton("🗑️ Borrar listado", callback_data=f"menu_ldelall_{idx}")])
+    rows.append([InlineKeyboardButton("⬅️ Volver a listados", callback_data="menu_listados")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _format_today_events(events: list[dict]) -> str:
     if not events:
         return "📅 No tiene eventos para hoy."
@@ -1799,6 +1979,85 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    if data == "menu_listados":
+        names = await get_list_names(user)
+        await query.edit_message_text(
+            _format_lists(names), parse_mode="Markdown", reply_markup=_build_lists_menu(names),
+        )
+        return
+
+    if data == "menu_listnew":
+        _awaiting_list_name.add(chat_id)
+        await query.message.reply_text(
+            "📝 ¿Cómo se va a llamar el listado? Mándeme el nombre (ej. *Viaje*).",
+            parse_mode="Markdown",
+        )
+        return
+
+    if data.startswith("menu_lopen_"):
+        idx = int(data.rsplit("_", 1)[1])
+        names = await get_list_names(user)
+        if idx >= len(names):
+            return
+        nombre = names[idx]["nombre"]
+        items = await get_list_items(user, nombre)
+        await query.edit_message_text(
+            _format_list(nombre, items), parse_mode="Markdown",
+            reply_markup=_build_list_menu(idx, items),
+        )
+        return
+
+    if data.startswith("menu_ladd_"):
+        idx = int(data.rsplit("_", 1)[1])
+        names = await get_list_names(user)
+        if idx >= len(names):
+            return
+        nombre = names[idx]["nombre"]
+        _list_add_mode[chat_id] = nombre
+        await query.message.reply_text(
+            f"📝 *Modo listado «{nombre}».*\nMándeme los ítems (uno por línea o con comas). "
+            "Puede pegar un listado entero.\n\nEscriba *listo* cuando termine.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Terminar", callback_data="menu_listdone")
+            ]]),
+        )
+        return
+
+    if data.startswith("menu_lidel_"):
+        _, _, idx_s, n_s = data.split("_", 3)
+        names = await get_list_names(user)
+        if int(idx_s) >= len(names):
+            return
+        nombre = names[int(idx_s)]["nombre"]
+        await remove_list_items(user, nombre, [int(n_s)])
+        items = await get_list_items(user, nombre)
+        await query.edit_message_text(
+            _format_list(nombre, items), parse_mode="Markdown",
+            reply_markup=_build_list_menu(int(idx_s), items),
+        )
+        return
+
+    if data.startswith("menu_ldelall_"):
+        idx = int(data.rsplit("_", 1)[1])
+        names = await get_list_names(user)
+        if idx < len(names):
+            await delete_list(user, names[idx]["nombre"])
+        names = await get_list_names(user)
+        await query.edit_message_text(
+            _format_lists(names), parse_mode="Markdown", reply_markup=_build_lists_menu(names),
+        )
+        return
+
+    if data == "menu_listdone":
+        _list_add_mode.pop(chat_id, None)
+        names = await get_list_names(user)
+        await query.edit_message_text(
+            "✅ Listo.\n\n" + _format_lists(names), parse_mode="Markdown",
+            reply_markup=_build_lists_menu(names),
+        )
+        return
+
     if data == "menu_hoy":
         events = await get_today_events(user)
         await query.edit_message_text(
@@ -1869,6 +2128,49 @@ async def _route_text(
 ) -> None:
     message = update.message
     chat_id = user["chat_id"]
+
+    # Waiting for the name of a new list (from the menu)
+    if chat_id in _awaiting_list_name:
+        _awaiting_list_name.discard(chat_id)
+        nombre = text.strip()[:60]
+        if not nombre or nombre.startswith("."):
+            await message.reply_text("Nombre no válido. Probá de nuevo desde el menú.")
+            return
+        _list_add_mode[chat_id] = nombre
+        await message.reply_text(
+            f"📝 *Listado «{nombre}» creado.*\nMándeme los ítems (uno por línea o con comas). "
+            "Escriba *listo* cuando termine.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Terminar", callback_data="menu_listdone")
+            ]]),
+        )
+        return
+
+    # Named-list "add mode" — everything sent goes into that list until "listo"
+    if chat_id in _list_add_mode:
+        nombre = _list_add_mode[chat_id]
+        if text.strip().lower() in (
+            "listo", "salir", "menu", "menú", "chau", "fin", "terminar", "ya está", "ya esta", "."
+        ):
+            _list_add_mode.pop(chat_id, None)
+            items = await get_list_items(user, nombre)
+            await message.reply_text(
+                "✅ Listo.\n\n" + _format_list(nombre, items), parse_mode="Markdown",
+            )
+            return
+        nuevos = _split_items(text)
+        await add_list_items(user, nombre, nuevos)
+        added = "\n".join(f"• {n}" for n in nuevos) or "(nada)"
+        await message.reply_text(
+            f"✅ Agregué {len(nuevos)} a «{nombre}»:\n{added}\n\n"
+            "Seguí mandando más o escribí *listo* para terminar.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Terminar", callback_data="menu_listdone")
+            ]]),
+        )
+        return
 
     # Supermarket "add mode" — everything sent is treated as items until "listo"
     if chat_id in _super_add_mode:
