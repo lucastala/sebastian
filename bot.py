@@ -75,6 +75,9 @@ openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Chat/vision model — change here to swap models everywhere
 CHAT_MODEL = "gpt-4.1-mini"
 
+# Max chained tool rounds per message (search→update, etc.) before forcing a reply
+MAX_TOOL_ROUNDS = 5
+
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "https://tu-link-de-pago.com")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 ARGENTINA_TZ = timezone(timedelta(hours=-3))
@@ -1262,6 +1265,130 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
     return {"error": f"Función desconocida: {func_name}"}
 
 
+async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
+    """Execute one assistant message's tool calls and append their results to
+    `messages`. Returns (pending_keyboard, show_tasks)."""
+    pending_keyboard: InlineKeyboardMarkup | None = None
+    show_tasks = False
+
+    for tc in msg.tool_calls:
+        func_name = tc.function.name
+        func_args = json.loads(tc.function.arguments)
+        logger.info(f"Tool call: {func_name}({func_args}) for user {chat_id}")
+
+        if func_name in ("update_task", "delete_task"):
+            show_tasks = True
+
+        if func_name == "add_task":
+            tarea = func_args.get("tarea", "")
+            fecha = func_args.get("fecha")
+            task_id = await add_task(user, tarea)
+            if not task_id:
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": "No se pudo agregar la tarea (configuración de Google incompleta).",
+                })
+            elif fecha:
+                await update_task_fecha(user, task_id, fecha)
+                show_tasks = True
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": json.dumps({"ok": True, "tarea": tarea, "fecha": fecha}, ensure_ascii=False),
+                })
+            else:
+                # No due date given → show the calendar so the user can pick one
+                now = datetime.now(ARGENTINA_TZ)
+                pending_keyboard = _build_calendar_keyboard(task_id, now.year, now.month)
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": (
+                        f"Tarea '{tarea}' agregada. Decile al usuario que la agregaste y "
+                        "preguntale para cuándo es la fecha límite (se le está mostrando un "
+                        "calendario para elegirla)."
+                    ),
+                })
+        elif func_name == "delete_event":
+            query = func_args.get("query", "")
+            fecha = func_args.get("fecha")
+            # Search for the event internally
+            if fecha:
+                events = await get_events_by_date(user, fecha)
+                matched = [e for e in events if query.lower() in e.get("nombre", "").lower()]
+                if not matched:
+                    matched = events  # fallback: show all events for that date
+            else:
+                matched = await search_event(user, query)
+
+            if not matched:
+                messages.append({
+                    "tool_call_id": tc.id,
+                    "role": "tool",
+                    "name": func_name,
+                    "content": "No se encontró ningún evento con ese nombre.",
+                })
+            else:
+                ev = matched[0]
+                event_id = ev["id"]
+                event_name = ev.get("nombre", "evento")
+                inicio = ev.get("inicio", "")
+                try:
+                    dt = datetime.fromisoformat(inicio)
+                    time_str = dt.strftime("%d/%m %H:%M")
+                    label = f"🗑️ Sí, eliminar — {event_name} ({time_str})"
+                except Exception:
+                    label = f"🗑️ Sí, eliminar — {event_name}"
+                pending_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(label, callback_data=f"delEvent_{event_id}"),
+                    InlineKeyboardButton("❌ No", callback_data="delEventCancel"),
+                ]])
+                messages.append({
+                    "tool_call_id": tc.id,
+                    "role": "tool",
+                    "name": func_name,
+                    "content": f"Evento encontrado: {event_name}. Mostrando botón de confirmación.",
+                })
+        elif func_name == "create_event" and func_args.get("hora"):
+            nombre = func_args["nombre"]
+            fecha = func_args["fecha"]
+            hora = func_args["hora"]
+            day_events = await get_events_by_date(user, fecha)
+            try:
+                target_dt = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=ARGENTINA_TZ)
+            except ValueError:
+                target_dt = None
+            conflicts = (
+                [ev for ev in day_events if _within_minutes(ev.get("inicio", ""), target_dt, timedelta(minutes=30))]
+                if target_dt else []
+            )
+            if conflicts:
+                _pending_event_creates[chat_id] = {"nombre": nombre, "fecha": fecha, "hora": hora}
+                conflict_names = ", ".join(f'"{ev["nombre"]}"' for ev in conflicts[:3])
+                pending_keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Sí, agendar igual", callback_data="createConflict_yes"),
+                    InlineKeyboardButton("❌ Cancelar", callback_data="createConflict_no"),
+                ]])
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": f"Advertencia: hay evento(s) a menos de 30 minutos ({conflict_names}). Se le mostró al usuario la opción de agendar igual.",
+                })
+            else:
+                result = await _execute_tool(func_name, func_args, user)
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                })
+        else:
+            result = await _execute_tool(func_name, func_args, user)
+            messages.append({
+                "tool_call_id": tc.id,
+                "role": "tool",
+                "name": func_name,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
+
+    return pending_keyboard, show_tasks
+
+
 async def _call_openai(
     user: dict, text: str
 ) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -1430,134 +1557,29 @@ async def _call_openai(
 
     msg = response.choices[0].message
 
-    if not msg.tool_calls:
-        reply = msg.content or "No pude procesar tu mensaje."
-        _add_to_history(chat_id, text, reply)
-        return reply, None, False
-
-    messages.append(msg)
     pending_keyboard: InlineKeyboardMarkup | None = None
     show_tasks = False  # only append the tasks list when the list actually changed
+    rounds = 0
 
-    for tc in msg.tool_calls:
-        func_name = tc.function.name
-        func_args = json.loads(tc.function.arguments)
-        logger.info(f"Tool call: {func_name}({func_args}) for user {chat_id}")
+    # Multi-round tool loop: keep the tools available so the model can chain
+    # actions in the same turn (e.g. search_event → update_event) instead of
+    # promising to do something and never doing it.
+    while msg.tool_calls and rounds < MAX_TOOL_ROUNDS:
+        rounds += 1
+        messages.append(msg)
+        pk, st = await _run_tool_calls(msg, messages, user, chat_id)
+        if pk is not None:
+            pending_keyboard = pk
+        show_tasks = show_tasks or st
+        response = await openai_client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=messages,
+            tools=OPENAI_TOOLS,
+            tool_choice="auto",
+        )
+        msg = response.choices[0].message
 
-        if func_name in ("update_task", "delete_task"):
-            show_tasks = True
-
-        if func_name == "add_task":
-            tarea = func_args.get("tarea", "")
-            fecha = func_args.get("fecha")
-            task_id = await add_task(user, tarea)
-            if not task_id:
-                messages.append({
-                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
-                    "content": "No se pudo agregar la tarea (configuración de Google incompleta).",
-                })
-            elif fecha:
-                await update_task_fecha(user, task_id, fecha)
-                show_tasks = True
-                messages.append({
-                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
-                    "content": json.dumps({"ok": True, "tarea": tarea, "fecha": fecha}, ensure_ascii=False),
-                })
-            else:
-                # No due date given → show the calendar so the user can pick one
-                now = datetime.now(ARGENTINA_TZ)
-                pending_keyboard = _build_calendar_keyboard(task_id, now.year, now.month)
-                messages.append({
-                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
-                    "content": (
-                        f"Tarea '{tarea}' agregada. Decile al usuario que la agregaste y "
-                        "preguntale para cuándo es la fecha límite (se le está mostrando un "
-                        "calendario para elegirla)."
-                    ),
-                })
-        elif func_name == "delete_event":
-            query = func_args.get("query", "")
-            fecha = func_args.get("fecha")
-            # Search for the event internally
-            if fecha:
-                events = await get_events_by_date(user, fecha)
-                matched = [e for e in events if query.lower() in e.get("nombre", "").lower()]
-                if not matched:
-                    matched = events  # fallback: show all events for that date
-            else:
-                matched = await search_event(user, query)
-
-            if not matched:
-                messages.append({
-                    "tool_call_id": tc.id,
-                    "role": "tool",
-                    "name": func_name,
-                    "content": "No se encontró ningún evento con ese nombre.",
-                })
-            else:
-                ev = matched[0]
-                event_id = ev["id"]
-                event_name = ev.get("nombre", "evento")
-                inicio = ev.get("inicio", "")
-                try:
-                    dt = datetime.fromisoformat(inicio)
-                    time_str = dt.strftime("%d/%m %H:%M")
-                    label = f"🗑️ Sí, eliminar — {event_name} ({time_str})"
-                except Exception:
-                    label = f"🗑️ Sí, eliminar — {event_name}"
-                pending_keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(label, callback_data=f"delEvent_{event_id}"),
-                    InlineKeyboardButton("❌ No", callback_data="delEventCancel"),
-                ]])
-                messages.append({
-                    "tool_call_id": tc.id,
-                    "role": "tool",
-                    "name": func_name,
-                    "content": f"Evento encontrado: {event_name}. Mostrando botón de confirmación.",
-                })
-        elif func_name == "create_event" and func_args.get("hora"):
-            nombre = func_args["nombre"]
-            fecha = func_args["fecha"]
-            hora = func_args["hora"]
-            day_events = await get_events_by_date(user, fecha)
-            try:
-                target_dt = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=ARGENTINA_TZ)
-            except ValueError:
-                target_dt = None
-            conflicts = (
-                [ev for ev in day_events if _within_minutes(ev.get("inicio", ""), target_dt, timedelta(minutes=30))]
-                if target_dt else []
-            )
-            if conflicts:
-                _pending_event_creates[chat_id] = {"nombre": nombre, "fecha": fecha, "hora": hora}
-                conflict_names = ", ".join(f'"{ev["nombre"]}"' for ev in conflicts[:3])
-                pending_keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ Sí, agendar igual", callback_data="createConflict_yes"),
-                    InlineKeyboardButton("❌ Cancelar", callback_data="createConflict_no"),
-                ]])
-                messages.append({
-                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
-                    "content": f"Advertencia: hay evento(s) a menos de 30 minutos ({conflict_names}). Se le mostró al usuario la opción de agendar igual.",
-                })
-            else:
-                result = await _execute_tool(func_name, func_args, user)
-                messages.append({
-                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
-        else:
-            result = await _execute_tool(func_name, func_args, user)
-            messages.append({
-                "tool_call_id": tc.id,
-                "role": "tool",
-                "name": func_name,
-                "content": json.dumps(result, ensure_ascii=False, default=str),
-            })
-
-    final = await openai_client.chat.completions.create(
-        model=CHAT_MODEL, messages=messages
-    )
-    reply = final.choices[0].message.content or "Listo."
+    reply = msg.content or "Listo."
     _add_to_history(chat_id, text, reply)
     return reply, pending_keyboard, show_tasks
 
