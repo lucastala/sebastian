@@ -220,9 +220,19 @@ def _is_task_edit_intent(text: str) -> bool:
     return has_rename or has_edit_phrase or (has_tarea_num and has_task)
 
 
+_EVENT_EDIT_VERBS = (
+    "cambiá", "cambia", "cambiame", "modificá", "modifica", "modificame",
+    "editá", "edita", "mové", "move", "pasá", "pasa", "corré", "corre",
+)
+_EVENT_NOUNS = ("evento", "reunión", "reunion", "turno", "cita", "junta")
+
+
 def _is_event_edit_intent(text: str) -> bool:
     t = text.lower()
-    return any(p in t for p in _EDIT_EVENT_STEMS)
+    if any(p in t for p in _EDIT_EVENT_STEMS):
+        return True
+    # edit verb + an event noun (ej. "cambiame la reunión a las 11")
+    return any(v in t for v in _EVENT_EDIT_VERBS) and any(n in t for n in _EVENT_NOUNS)
 
 
 def _is_expense_query_intent(text: str) -> bool:
@@ -589,16 +599,20 @@ OPENAI_TOOLS = [
         "function": {
             "name": "update_event",
             "description": (
-                "Edita un evento existente del Google Calendar. "
-                "Primero buscá el evento con search_event o get_events_by_date para obtener su ID. "
-                "Podés cambiar el nombre, la fecha y/o la hora."
+                "Edita un evento del Google Calendar EN UN SOLO PASO. Pasá el nombre del evento en "
+                "'query' (y opcionalmente 'fecha' para ubicarlo) y los cambios. El sistema busca el "
+                "evento solo; NO uses search_event antes. Podés cambiar nombre, fecha y/o hora."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "event_id": {
+                    "query": {
                         "type": "string",
-                        "description": "ID del evento a editar",
+                        "description": "Nombre o descripción del evento a editar",
+                    },
+                    "fecha": {
+                        "type": "string",
+                        "description": "Fecha actual del evento YYYY-MM-DD, para ubicarlo (opcional)",
                     },
                     "nuevo_nombre": {
                         "type": "string",
@@ -613,7 +627,7 @@ OPENAI_TOOLS = [
                         "description": "Nueva hora en formato HH:MM (opcional)",
                     },
                 },
-                "required": ["event_id"],
+                "required": ["query"],
             },
         },
     },
@@ -1150,14 +1164,29 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         return {"ok": task_id is not None, "tarea": func_args["tarea"],
                 "fecha": func_args.get("fecha")}
     if func_name == "update_event":
+        # Self-contained: find the event by name/date, then update it (one step)
+        query = func_args.get("query", "")
+        fecha = func_args.get("fecha")
+        if fecha:
+            events = await get_events_by_date(user, fecha)
+            matched = [e for e in events if query.lower() in e.get("nombre", "").lower()] or events
+        else:
+            matched = await search_event(user, query)
+        if not matched:
+            return {"ok": False, "error": "No se encontró ningún evento con ese nombre."}
+        ev = matched[0]
         result = await update_event(
             user,
-            func_args["event_id"],
+            ev["id"],
             nuevo_nombre=func_args.get("nuevo_nombre"),
             nueva_fecha=func_args.get("nueva_fecha"),
             nueva_hora=func_args.get("nueva_hora"),
         )
-        return result
+        return {"ok": True, "evento": result.get("nombre"), "cambios": {
+            "nombre": func_args.get("nuevo_nombre"),
+            "fecha": func_args.get("nueva_fecha"),
+            "hora": func_args.get("nueva_hora"),
+        }}
     if func_name == "update_task":
         ok = await update_task(
             user,
@@ -1431,9 +1460,10 @@ async def _call_openai(
             "con el nombre del evento y la fecha. NO busques el evento antes, NO pidas confirmación con texto. "
             "El sistema se encarga de buscar el evento y mostrar el botón de confirmación."
             "\n\nREGLA PARA EDITAR EVENTOS: "
-            "Cuando el usuario quiera editar un evento (cambiar hora, nombre o fecha), "
-            "primero buscalo con search_event o get_events_by_date para obtener su ID, "
-            "luego llamá update_event con los cambios. "
+            "Cuando el usuario quiera editar un evento (cambiar hora, nombre o fecha), llamá "
+            "update_event DIRECTAMENTE, pasando el nombre del evento en 'query' (y 'fecha' si la "
+            "sabés) más los cambios. NO uses search_event antes: update_event ya busca el evento. "
+            "Después de llamarlo, confirmá que YA quedó modificado (no digas que lo vas a hacer)."
             "\n\nREGLA PARA AGREGAR TAREAS (MUY IMPORTANTE): "
             "Cuando el usuario pida agregar/anotar/sumar/recordar algo que tiene que hacer, "
             "o exprese un pendiente sin hora de calendario (ej. 'comprar pan', 'llamar al médico', "
