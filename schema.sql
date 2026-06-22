@@ -21,6 +21,27 @@ ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS genero TEXT;
 CREATE INDEX IF NOT EXISTS idx_usuarios_estado
     ON public.usuarios (estado_suscripcion);
 
+-- Recordatorios con hora (los dispara el scheduler)
+CREATE TABLE IF NOT EXISTS public.recordatorios (
+    id          BIGSERIAL    PRIMARY KEY,
+    chat_id     BIGINT       NOT NULL REFERENCES public.usuarios(chat_id) ON DELETE CASCADE,
+    texto       TEXT         NOT NULL,
+    fecha_hora  TIMESTAMPTZ  NOT NULL,
+    enviado     BOOLEAN      NOT NULL DEFAULT FALSE,
+    creado      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_recordatorios_pendientes
+    ON public.recordatorios (fecha_hora) WHERE enviado = FALSE;
+
+ALTER TABLE public.recordatorios ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Service role full access recordatorios"
+    ON public.recordatorios
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
 -- Enable Row Level Security
 ALTER TABLE public.usuarios ENABLE ROW LEVEL SECURITY;
 

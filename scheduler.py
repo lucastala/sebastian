@@ -6,7 +6,11 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
 
-from database import get_active_users
+from database import (
+    get_active_users,
+    get_due_reminders,
+    mark_reminder_sent,
+)
 from google_services import (
     get_pending_tasks,
     get_today_events,
@@ -138,6 +142,19 @@ async def check_upcoming_events(bot: Bot) -> None:
                 _notified_events.add(key)
 
 
+async def check_reminders(bot: Bot) -> None:
+    due = await get_due_reminders()
+    for r in due:
+        try:
+            await bot.send_message(
+                chat_id=r["chat_id"], text=f"⏰ Recordatorio: {r['texto']}"
+            )
+        except Exception as e:
+            logger.error(f"Error sending reminder {r.get('id')}: {e}")
+        finally:
+            await mark_reminder_sent(r["id"])
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=ARGENTINA_TZ)
     scheduler.add_job(
@@ -162,6 +179,14 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="event_reminders",
         name="Upcoming Event Reminders",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_reminders,
+        IntervalTrigger(minutes=1),
+        args=[bot],
+        id="reminders",
+        name="Timed Reminders",
         replace_existing=True,
     )
     return scheduler

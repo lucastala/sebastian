@@ -20,9 +20,12 @@ from telegram.ext import (
 )
 
 from database import (
+    add_reminder,
     create_user,
+    delete_reminder,
     get_active_users,
     get_user,
+    get_user_reminders,
     update_user_genero,
 )
 from texts import INSTRUCCIONES_TEXTO
@@ -372,6 +375,33 @@ def _is_lists_query_intent(text: str) -> bool:
     if t in ("listados", "mis listados"):
         return True
     return any(p in t for p in _LISTS_QUERY_PHRASES)
+
+
+# ── Recordatorios con hora ────────────────────────────────────────────────────
+_REMINDER_VERBS = (
+    "recordame", "recordá", "recorda", "recuérdame", "recuerdame",
+    "avisame", "avísame", "avisá", "avisame que", "hacéme acordar", "haceme acordar",
+)
+_REMINDER_QUERY_PHRASES = (
+    "mis recordatorios", "qué recordatorios", "que recordatorios",
+    "ver recordatorios", "mostrame los recordatorios",
+)
+
+
+def _has_time(text: str) -> bool:
+    return bool(re.search(r"\ba las\s*\d|\b\d{1,2}\s*(hs|horas|am|pm)\b|\b\d{1,2}:\d{2}", text.lower()))
+
+
+def _is_reminder_add_intent(text: str) -> bool:
+    t = text.lower()
+    return any(v in t for v in _REMINDER_VERBS) and _has_time(t)
+
+
+def _is_reminder_query_intent(text: str) -> bool:
+    t = text.lower().strip().strip(".!?¿¡ ")
+    if t in ("recordatorios", "mis recordatorios"):
+        return True
+    return any(p in t for p in _REMINDER_QUERY_PHRASES)
 
 
 def _is_expense_delete_intent(text: str) -> bool:
@@ -1032,6 +1062,49 @@ OPENAI_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_reminder",
+            "description": (
+                "Programa un recordatorio para AVISAR a una hora específica. Usalo cuando el "
+                "usuario pida que le recuerdes/avises algo a una hora ('recordame llamar al médico "
+                "mañana a las 3', 'avisame a las 18 que saque la carne'). Calculá la fecha y la hora."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "texto": {"type": "string", "description": "Qué recordar"},
+                    "fecha": {"type": "string", "description": "Fecha YYYY-MM-DD (por defecto hoy)"},
+                    "hora": {"type": "string", "description": "Hora HH:MM (24h)"},
+                },
+                "required": ["texto", "hora"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_reminders",
+            "description": "Lista los recordatorios pendientes del usuario (los que todavía no se avisaron).",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_reminder",
+            "description": "Cancela uno o varios recordatorios pendientes por su número en la lista. Pasá los números en 'posiciones'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "posiciones": {"type": "array", "items": {"type": "integer"},
+                                   "description": "Números de los recordatorios a cancelar"},
+                },
+                "required": ["posiciones"],
+            },
+        },
+    },
 ]
 
 
@@ -1296,6 +1369,33 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
     if func_name == "delete_list":
         n = await delete_list(user, func_args["nombre"])
         return {"ok": n > 0, "eliminados": n}
+    if func_name == "add_reminder":
+        fecha = func_args.get("fecha") or datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
+        hora = func_args.get("hora", "09:00")
+        try:
+            dt = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M").replace(tzinfo=ARGENTINA_TZ)
+        except ValueError:
+            return {"ok": False, "error": "Fecha u hora inválida"}
+        if dt <= datetime.now(ARGENTINA_TZ):
+            return {"ok": False, "error": "Esa hora ya pasó; pedí una hora futura."}
+        ok = await add_reminder(
+            user["chat_id"], func_args["texto"], dt.astimezone(timezone.utc).isoformat()
+        )
+        return {"ok": ok, "cuando": f"{_format_fecha(fecha)} a las {hora}"}
+    if func_name == "get_reminders":
+        rems = await get_user_reminders(user["chat_id"])
+        return [
+            {"n": i, "texto": r["texto"], "cuando": _fmt_reminder_when(r["fecha_hora"])}
+            for i, r in enumerate(rems, 1)
+        ]
+    if func_name == "cancel_reminder":
+        rems = await get_user_reminders(user["chat_id"])
+        canceladas = []
+        for p in sorted({int(x) for x in func_args.get("posiciones", [])}, reverse=True):
+            if 1 <= p <= len(rems):
+                await delete_reminder(rems[p - 1]["id"])
+                canceladas.append(rems[p - 1]["texto"])
+        return {"ok": len(canceladas) > 0, "canceladas": canceladas}
     return {"error": f"Función desconocida: {func_name}"}
 
 
@@ -1469,6 +1569,12 @@ async def _call_openai(
             "update_event DIRECTAMENTE, pasando el nombre del evento en 'query' (y 'fecha' si la "
             "sabés) más los cambios. NO uses search_event antes: update_event ya busca el evento. "
             "Después de llamarlo, confirmá que YA quedó modificado (no digas que lo vas a hacer)."
+            "\n\nREGLA PARA RECORDATORIOS CON HORA: "
+            "Si el usuario pide que le RECUERDES o AVISES algo a una hora específica "
+            "('recordame X mañana a las 3', 'avisame a las 18 que...'), usá add_reminder con el "
+            "texto, la fecha (YYYY-MM-DD) y la hora (HH:MM, 24h). Diferencia con tareas: si NO hay "
+            "hora, es una tarea (add_task); si hay hora para avisar, es un recordatorio. "
+            "Para verlos usá get_reminders y para cancelarlos cancel_reminder por número."
             "\n\nREGLA PARA AGREGAR TAREAS (MUY IMPORTANTE): "
             "Cuando el usuario pida agregar/anotar/sumar/recordar algo que tiene que hacer, "
             "o exprese un pendiente sin hora de calendario (ej. 'comprar pan', 'llamar al médico', "
@@ -1551,6 +1657,10 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "get_debts"}}
     elif _is_debt_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_debt"}}
+    elif _is_reminder_query_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "get_reminders"}}
+    elif _is_reminder_add_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_reminder"}}
     elif _is_task_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_task"}}
     elif _is_fixed_query_intent(text):
@@ -1716,6 +1826,15 @@ def _fmt_dia(fecha_str: str) -> str:
         return datetime.strptime(fecha_str, "%Y-%m-%d").strftime("%d/%m")
     except (ValueError, TypeError):
         return ""
+
+
+def _fmt_reminder_when(iso_utc: str) -> str:
+    """ISO UTC string → 'martes 16 a las 15:00' en hora de Argentina."""
+    try:
+        dt = datetime.fromisoformat(str(iso_utc).replace("Z", "+00:00")).astimezone(ARGENTINA_TZ)
+        return f"{DIAS_ES[dt.weekday()]} {dt.day} a las {dt.strftime('%H:%M')}"
+    except Exception:
+        return str(iso_utc)
 
 
 def _build_main_menu() -> InlineKeyboardMarkup:

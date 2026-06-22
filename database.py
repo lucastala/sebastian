@@ -104,3 +104,69 @@ async def get_active_users() -> list[dict]:
     except Exception as e:
         logger.error(f"Error fetching active users: {e}")
         return []
+
+
+# ── Recordatorios ─────────────────────────────────────────────────────────────
+
+async def add_reminder(chat_id: int, texto: str, fecha_hora_iso: str) -> bool:
+    try:
+        get_supabase().table("recordatorios").insert({
+            "chat_id": chat_id,
+            "texto": texto,
+            "fecha_hora": fecha_hora_iso,
+            "enviado": False,
+        }).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding reminder for {chat_id}: {e}")
+        return False
+
+
+async def get_due_reminders() -> list[dict]:
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        result = (
+            get_supabase()
+            .table("recordatorios")
+            .select("*")
+            .lte("fecha_hora", now)
+            .eq("enviado", False)
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        logger.error(f"Error fetching due reminders: {e}")
+        return []
+
+
+async def mark_reminder_sent(reminder_id: int) -> None:
+    try:
+        get_supabase().table("recordatorios").update({"enviado": True}).eq(
+            "id", reminder_id
+        ).execute()
+    except Exception as e:
+        logger.error(f"Error marking reminder {reminder_id} sent: {e}")
+
+
+async def get_user_reminders(chat_id: int) -> list[dict]:
+    try:
+        result = (
+            get_supabase()
+            .table("recordatorios")
+            .select("*")
+            .eq("chat_id", chat_id)
+            .eq("enviado", False)
+            .order("fecha_hora")
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        logger.error(f"Error fetching reminders for {chat_id}: {e}")
+        return []
+
+
+async def delete_reminder(reminder_id: int) -> None:
+    try:
+        get_supabase().table("recordatorios").delete().eq("id", reminder_id).execute()
+    except Exception as e:
+        logger.error(f"Error deleting reminder {reminder_id}: {e}")
