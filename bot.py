@@ -1109,8 +1109,13 @@ async def build_tasks_footer(user: dict) -> str:
     except GoogleAuthExpiredError:
         return _session_expired_text(user["chat_id"])
     except Exception as e:
-        logger.error(f"Error fetching tasks for user {user.get('chat_id')}: {e}")
-        return "⚠️ No se pudieron cargar las tareas pendientes."
+        logger.error(
+            f"Error fetching tasks for user {user.get('chat_id')}: {type(e).__name__}: {e}"
+        )
+        return (
+            "⚠️ No pude acceder a su planilla. Probá reconectar su cuenta con /reconectar; "
+            "si sigue, avisame."
+        )
 
     if not tasks:
         return "No tiene tareas pendientes.\n\nUse .texto para agregar una tarea."

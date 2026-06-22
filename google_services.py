@@ -85,6 +85,25 @@ async def create_user_sheet(credentials: Credentials) -> str:
     return await loop.run_in_executor(None, _create)
 
 
+def _sheet_is_missing(exc: Exception) -> bool:
+    """True if the error means the spreadsheet was deleted / is gone (404)."""
+    if isinstance(exc, gspread.SpreadsheetNotFound):
+        return True
+    if isinstance(exc, gspread.exceptions.APIError):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status == 404
+    return False
+
+
+async def _recreate_user_sheet(user: dict, creds) -> None:
+    """Create a fresh sheet for the user and save the new id (self-heal)."""
+    new_id = await create_user_sheet(creds)
+    from database import update_user_sheet_id
+    await update_user_sheet_id(user["chat_id"], new_id)
+    user["sheets_id"] = new_id
+    logger.warning(f"Recreated missing sheet for chat_id={user.get('chat_id')} -> {new_id}")
+
+
 async def get_pending_tasks(user: dict) -> list[dict]:
     if not user.get("sheets_id"):
         return []
@@ -98,7 +117,14 @@ async def get_pending_tasks(user: dict) -> list[dict]:
         records = sh.sheet1.get_all_records()
         return [r for r in records if str(r.get("estado", "")).lower() == "pendiente"]
 
-    return await loop.run_in_executor(None, _get)
+    try:
+        return await loop.run_in_executor(None, _get)
+    except Exception as e:
+        if _sheet_is_missing(e):
+            # The user's spreadsheet was deleted → recreate it and start fresh
+            await _recreate_user_sheet(user, creds)
+            return []
+        raise
 
 
 async def add_task(user: dict, tarea: str) -> str | None:
