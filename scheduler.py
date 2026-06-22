@@ -12,6 +12,8 @@ from database import (
     mark_reminder_sent,
 )
 from google_services import (
+    get_balance,
+    get_expenses,
     get_pending_tasks,
     get_today_events,
     log_due_fixed_expenses,
@@ -22,6 +24,21 @@ ARG_TZ = timezone(timedelta(hours=-3))
 logger = logging.getLogger(__name__)
 
 ARGENTINA_TZ = "America/Argentina/Buenos_Aires"
+
+_MESES = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+          "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+_CAT_EMOJI = {
+    "Supermercado": "🛒", "Restaurantes y delivery": "🍕", "Transporte": "⛽",
+    "Vivienda": "🏠", "Salud": "💊", "Ropa y calzado": "👕", "Suscripciones": "📱",
+    "Entretenimiento": "🎉", "Trabajo": "💼", "Otros": "📦",
+}
+
+
+def _money(value) -> str:
+    try:
+        return f"${int(round(float(value))):,}".replace(",", ".")
+    except (ValueError, TypeError):
+        return f"${value}"
 
 # Events already notified this run — (chat_id, event_id). Cleared on restart.
 _notified_events: set[tuple[int, str]] = set()
@@ -142,6 +159,62 @@ async def check_upcoming_events(bot: Bot) -> None:
                 _notified_events.add(key)
 
 
+async def send_monthly_summary(bot: Bot) -> None:
+    """On the 1st of the month, send each user a recap of the previous month."""
+    users = await get_active_users()
+    today = datetime.now(ARG_TZ)
+    first_this = today.replace(day=1)
+    last_prev = first_this - timedelta(days=1)        # last day of previous month
+    first_prev = last_prev.replace(day=1)
+    last_pp = first_prev - timedelta(days=1)           # month before that
+    first_pp = last_pp.replace(day=1)
+
+    desde_prev, hasta_prev = first_prev.strftime("%Y-%m-%d"), last_prev.strftime("%Y-%m-%d")
+    desde_pp, hasta_pp = first_pp.strftime("%Y-%m-%d"), last_pp.strftime("%Y-%m-%d")
+    mes_nombre = _MESES[last_prev.month]
+
+    logger.info(f"Sending monthly summary ({mes_nombre}) to {len(users)} users")
+
+    for user in users:
+        if not user.get("access_token"):
+            continue
+        try:
+            exp = await get_expenses(user, desde=desde_prev, hasta=hasta_prev)
+            total = exp.get("total", 0)
+            if total <= 0:
+                continue  # nothing to report
+            prev = await get_expenses(user, desde=desde_pp, hasta=hasta_pp)
+            bal = await get_balance(user, desde=desde_prev, hasta=hasta_prev)
+
+            lines = [f"📊 *Resumen de {mes_nombre}*\n", f"Gastaste *{_money(total)}*"]
+            prev_total = prev.get("total", 0)
+            if prev_total > 0:
+                diff = (total - prev_total) / prev_total * 100
+                signo = "más" if diff >= 0 else "menos"
+                lines[-1] += f" ({abs(diff):.0f}% {signo} que {_MESES[last_pp.month]})."
+            else:
+                lines[-1] += "."
+
+            por_cat = exp.get("por_categoria", {})
+            if por_cat:
+                lines.append("\nPor categoría:")
+                for cat, monto in sorted(por_cat.items(), key=lambda x: x[1], reverse=True):
+                    emoji = _CAT_EMOJI.get(cat, "•")
+                    lines.append(f"{emoji} {cat}: {_money(monto)}")
+
+            ingresos = bal.get("ingresos", 0)
+            if ingresos > 0:
+                lines.append(f"\n⬆️ Ingresos: {_money(ingresos)}  ·  🟢 Balance: {_money(bal.get('balance', 0))}")
+
+            text = "\n".join(lines)
+            try:
+                await bot.send_message(chat_id=user["chat_id"], text=text, parse_mode="Markdown")
+            except Exception:
+                await bot.send_message(chat_id=user["chat_id"], text=text)
+        except Exception as e:
+            logger.error(f"Error sending monthly summary to {user['chat_id']}: {e}")
+
+
 async def check_reminders(bot: Bot) -> None:
     due = await get_due_reminders()
     for r in due:
@@ -187,6 +260,14 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="reminders",
         name="Timed Reminders",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        send_monthly_summary,
+        CronTrigger(day=1, hour=10, minute=0, timezone=ARGENTINA_TZ),
+        args=[bot],
+        id="monthly_summary",
+        name="Monthly Expense Summary",
         replace_existing=True,
     )
     return scheduler
