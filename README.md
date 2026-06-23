@@ -1,69 +1,47 @@
 # Sebastian SaaS — Asistente Personal en Telegram
 
-Bot de Telegram multiusuario en Python. Cada usuario conecta su propia cuenta de Google y tiene su Calendar y su Google Sheet personal.
+Bot de Telegram multiusuario en Python. Asistente de productividad y finanzas
+personales: tareas, gastos, listas, recordatorios y calendario, todo en lenguaje
+natural. Modelo por suscripción (MercadoPago + códigos de activación).
 
-> Nota: el soporte de Gmail no está incluido en la v1 (se quitó para usar solo scopes sensibles y evitar la verificación restringida de Google). Podría sumarse en una v2.
+La data del usuario (tareas, gastos, listas, etc.) vive en **Supabase**. Lo único
+que se conecta a Google es el **Calendar**.
 
 ---
 
 ## Qué puede hacer
 
-Todo en lenguaje natural, sin comandos (salvo los atajos `.tarea` / `.N`):
+Todo en lenguaje natural (texto o audio 🎤), o con una foto 📷:
 
-- **Tareas** — agregar, listar, renombrar, cambiar fecha límite y eliminar.
-- **Calendario** — crear, buscar, editar y eliminar eventos; avisa si dos se pisan (< 30 min).
-- **Gastos** — registrar gastos con categoría automática y descripción; listar por período/categoría; editar el monto o eliminar.
-- **Gastos fijos** — declarar gastos mensuales recurrentes (alquiler, seguro, suscripciones…) que se cargan solos cada mes.
-- **Voz** — transcribe los audios con Whisper y los procesa como texto.
+- **Tareas** — agregar, listar, renombrar, fecha límite, eliminar (atajos `.texto` / `.N`).
+- **Recordatorios con hora** — "recordame X mañana a las 3" → avisa a esa hora.
+- **Calendario (Google)** — crear, buscar, editar y eliminar eventos; avisa si dos se pisan y ~30 min antes de cada uno.
+- **Gastos** — registrar con categoría automática y descripción; listar por período/categoría; editar el monto o eliminar. También por foto de ticket.
+- **Gastos fijos** — recurrentes mensuales (alquiler, seguro…) que se cargan solos.
+- **Ingresos y balance** — registrar cobros y ver el neto del mes.
+- **Deudas** — lo que debe y lo que le deben, con totales.
+- **Lista del súper y listados con nombre** — modo "dictado" para cargar de a muchos.
+- **Resúmenes automáticos** — del día (8am) y del mes (día 1).
 
-Las 10 categorías de gasto: Supermercado, Restaurantes y delivery, Transporte, Vivienda, Salud, Ropa y calzado, Suscripciones, Entretenimiento, Trabajo, Otros.
-
----
-
-## Cómo funciona
-
-El usuario le habla en lenguaje natural. El bot sigue esta lógica en orden:
-
-| Entrada | Acción |
-|---------|--------|
-| `.1`, `.2`, `.N` | Elimina la tarea N de la lista. Sin pasar por OpenAI. |
-| `.llamar al médico` | Agrega la tarea al Google Sheet. Sin pasar por OpenAI. |
-| Audio de voz | Transcribe con Whisper → vuelve al inicio con el texto. |
-| Cualquier otro texto | OpenAI gpt-4o-mini con function calling decide qué tool usar. |
-
-Sebastian responde siempre tratando al usuario de **usted**, con tono cordial y profesional.
-
-Al final de cualquier respuesta siempre aparece:
-```
-📋 Tareas pendientes:
-1. tarea
-2. tarea
-
-Use .texto para agregar una tarea. Use .número para eliminar.
-```
+Sebastian responde tratando al usuario de **usted** (señor/señora configurable).
 
 ---
 
-## Resumen diario automático — 8:00 AM Argentina
+## Arquitectura
 
-Para todos los usuarios con suscripción `activo` o `trial`:
 ```
-☀️ ¡Buenos días! Este es su resumen de hoy:
-
-📅 Eventos de hoy:
-- 10:00 Reunión con el contador
-
-📋 Tareas pendientes:
-1. llamar al médico
-2. pagar monotributo
+Telegram ──> bot.py (Background Worker)        ──> OpenAI (gpt-4.1-mini, Whisper, visión)
+                 │                              ──> Supabase  (data del usuario)
+                 │                              ──> Google Calendar
+MercadoPago ──> server.py (Web Service, FastAPI)──> Resend (email del código)
+                 (OAuth callback + webhook MP)  ──> Supabase
 ```
 
-Otros trabajos programados (`scheduler.py`):
-
-| Job | Frecuencia | Qué hace |
-|-----|-----------|----------|
-| Resumen diario | 8:00 AR | Eventos + tareas del día |
-| Gastos fijos | 9:00 AR | Carga los gastos fijos que vencen ese mes y avisa |
+- **bot.py** — Background Worker (polling de Telegram).
+- **server.py** — Web Service: callback de OAuth de Google + webhook de MercadoPago + endpoints de admin/pago.
+- **Supabase (PostgreSQL)** — usuarios, códigos, recordatorios y toda la data (tareas, gastos, listas…).
+- **Google** — solo Calendar (scopes: `openid`, `userinfo.email`, `calendar`).
+- Hosting: Render (los dos servicios, siempre prendidos).
 
 ---
 
@@ -71,159 +49,77 @@ Otros trabajos programados (`scheduler.py`):
 
 ```
 proyecto sebastian/
-├── bot.py              ← lógica principal del bot
-├── server.py           ← FastAPI para el callback de OAuth
-├── database.py         ← funciones de Supabase
-├── google_services.py  ← Sheets y Calendar por usuario
-├── scheduler.py        ← resumen diario 8am, gastos fijos (9am), avisos de eventos
+├── bot.py                  ← lógica del bot, tools de OpenAI, handlers
+├── server.py               ← FastAPI: OAuth callback, webhook MP, endpoints admin/pago
+├── data_store.py           ← acceso a datos en Supabase (tareas, gastos, listas, etc.)
+├── google_services.py      ← auth + Google Calendar (lo único que queda en Google)
+├── database.py             ← usuarios, suscripción, códigos, recordatorios (Supabase)
+├── mercadopago_service.py  ← suscripción y verificación de pagos (MercadoPago)
+├── email_service.py        ← envío del código de activación por email (Resend)
+├── scheduler.py            ← jobs programados (APScheduler)
+├── texts.py                ← textos compartidos (instrucciones/bienvenida)
+├── migrate_to_supabase.py  ← script único: migró los Sheets viejos a Supabase
+├── schema.sql              ← SQL de todas las tablas
 ├── requirements.txt
-├── schema.sql          ← SQL para crear la tabla en Supabase
-├── .env                ← credenciales (no subir al repo)
-├── .env.example        ← plantilla de variables
+├── .env / .env.example
 └── README.md
 ```
 
 ---
 
-## Paso a paso para configurar
+## Modelo de suscripción (MercadoPago)
 
-### 1. Crear proyecto en Supabase
+1. Usuario nuevo escribe al bot → "ingresá tu código o suscribite en chatsebastian.com".
+2. Paga la suscripción mensual (link de MercadoPago).
+3. El **webhook** verifica el pago, genera un **código de activación** (`SEB-XXXXX`) y se lo **manda por email** (Resend).
+4. El usuario escribe el código en el bot → queda **activo 30 días** → conecta Google → usa.
+5. Pagos recurrentes extienden el vencimiento; un job diario marca **inactivos** a los vencidos.
 
-1. Ir a [supabase.com](https://supabase.com) → New project
-2. Dashboard → **SQL Editor** → New query
-3. Pegar el contenido de `schema.sql` y ejecutar
-4. Ir a **Settings → API**:
-   - Copiar `Project URL` → `SUPABASE_URL`
-   - Copiar `service_role` key (no la anon) → `SUPABASE_KEY`
-
-### 2. Configurar Google OAuth en Google Cloud Console
-
-1. Ir a [console.cloud.google.com](https://console.cloud.google.com)
-2. Crear un proyecto nuevo (o usar uno existente)
-3. **APIs & Services → Enable APIs**:
-   - Google Calendar API ✓
-   - Google Sheets API ✓
-   - Google Drive API ✓
-4. **APIs & Services → OAuth consent screen**:
-   - User Type: **External**
-   - Completar nombre de la app, email de soporte
-   - Scopes: agregar `calendar`, `spreadsheets`, `drive.file`, `userinfo.email` (todos sensibles, sin scopes restringidos → verificación gratuita)
-   - En **Test users**: agregar los emails que van a usar el bot durante desarrollo
-5. **APIs & Services → Credentials → Create Credentials → OAuth client ID**:
-   - Application type: **Web application**
-   - Authorized redirect URIs: `http://localhost:8000/oauth/callback`
-   - Guardar el **Client ID** → `GOOGLE_CLIENT_ID`
-   - Guardar el **Client Secret** → `GOOGLE_CLIENT_SECRET`
-
-### 3. Crear el bot en Telegram
-
-1. Hablarle a [@BotFather](https://t.me/BotFather) en Telegram
-2. `/newbot` → seguir los pasos
-3. Copiar el token → `TELEGRAM_TOKEN`
-
-### 4. Completar el `.env`
-
-```bash
-cp .env.example .env
-```
-
-Editar `.env` con todos los valores:
-
-```env
-TELEGRAM_TOKEN=7xxxxxxxxxx:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-SUPABASE_URL=https://xxxxxxxxxxxxxxxxxxxx.supabase.co
-SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...   # service_role key
-GOOGLE_CLIENT_ID=xxxxxxxxxxxx-xxxxxxxx.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=GOCSPX-xxxxxxxxxxxxxxxxxxxxxxxx
-GOOGLE_REDIRECT_URI=http://localhost:8000/oauth/callback
-BASE_URL=http://localhost:8000
-PAYMENT_LINK=https://tu-link-de-pago.com
-```
-
-### 5. Instalar dependencias
-
-```bash
-python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # Mac/Linux
-
-pip install -r requirements.txt
-```
-
-### 6. Correr en local
-
-Necesitás **dos terminales** en paralelo:
-
-**Terminal 1 — servidor OAuth:**
-```bash
-uvicorn server:app --reload --port 8000
-```
-
-**Terminal 2 — bot de Telegram:**
-```bash
-python bot.py
-```
-
-Ahora podés escribirle al bot. Al registrarte por primera vez el bot te manda un link `http://localhost:8000/oauth/start?chat_id=TU_ID`. Abrilo en el navegador, autorizás con tu cuenta de Google, y el bot queda listo.
+Endpoints (en `server.py`, protegidos con `X-Admin-Key`):
+- `POST /webhook/mercadopago` — notificaciones de pago.
+- `POST /admin/crear-plan` — crea el plan y devuelve el link de suscripción.
+- `POST /admin/generar-codigo` — genera códigos manualmente.
+- `POST /admin/test-email` — manda un email de prueba.
+- `GET /pago/suscripcion?chat_id=` — link de pago por usuario.
 
 ---
 
-## Tabla de Supabase — `usuarios`
+## Jobs programados (`scheduler.py`)
 
-| Columna | Tipo | Descripción |
-|---------|------|-------------|
-| `chat_id` | BIGINT PK | ID de Telegram |
-| `email` | TEXT | Email de Google |
-| `nombre` | TEXT | Nombre del usuario |
-| `access_token` | TEXT | Token de Google OAuth |
-| `refresh_token` | TEXT | Refresh token |
-| `token_expiry` | TIMESTAMPTZ | Vencimiento del token |
-| `sheets_id` | TEXT | ID del Google Sheet del usuario |
-| `estado_suscripcion` | TEXT | `trial` / `activo` / `inactivo` |
-| `genero` | TEXT | Trato preferido: `m` (señor) / `f` (señora) |
-| `fecha_alta` | TIMESTAMPTZ | Fecha de registro |
-
-> Importante: el backend usa la anon key, así que **RLS no se bypassa**. Toda tabla nueva necesita una política `FOR ALL USING (true) WITH CHECK (true)` y un `NOTIFY pgrst, 'reload schema';` tras crearla.
+| Job | Frecuencia | Qué hace |
+|-----|-----------|----------|
+| Resumen diario | 8:00 AR | Eventos + tareas del día |
+| Gastos fijos | 9:00 AR | Carga los fijos que vencen ese mes |
+| Avisos de eventos | cada 10 min | Avisa ~30 min antes de cada evento |
+| Recordatorios | cada 1 min | Dispara los recordatorios con hora |
+| Resumen mensual | día 1, 10:00 AR | Gastos del mes anterior + comparación |
+| Vencimiento de suscripción | 00:00 AR | Marca inactivos a los vencidos y avisa |
 
 ---
 
-## Herramientas de OpenAI (function calling)
+## Tablas de Supabase
 
-| Función | Descripción |
-|---------|-------------|
-| `get_today_events()` | Eventos de hoy en Google Calendar |
-| `get_events_by_date(fecha)` | Eventos de una fecha específica |
-| `search_event(query)` | Busca evento por nombre o descripción |
-| `create_event(nombre, fecha, hora?)` | Crea evento; sin hora → todo el día; avisa si se pisa con otro |
-| `update_event(event_id, ...)` | Edita nombre, fecha y/o hora de un evento |
-| `delete_event(query, fecha?)` | Busca el evento y muestra botón de confirmación para eliminar |
-| `get_pending_tasks()` | Lee tareas pendientes del Sheet |
-| `update_task(posicion, ...)` | Renombra o cambia la fecha de una tarea por su número |
-| `add_expense(monto, categoria, descripcion?, fecha?)` | Registra un gasto |
-| `get_expenses(desde?, hasta?, categoria?)` | Suma y lista gastos por período/categoría |
-| `update_expense_monto(posicion, nuevo_monto, ...)` | Cambia el monto de un gasto por su número |
-| `delete_expense(posicion, ...)` | Elimina un gasto por su número |
-| `add_fixed_expense(nombre, monto, categoria, dia_del_mes?)` | Declara un gasto fijo mensual |
-| `get_fixed_expenses()` | Lista los gastos fijos activos |
-| `cancel_fixed_expense(nombre)` | Da de baja un gasto fijo |
-| `add_income / get_balance` | Ingresos y balance del período |
-| `add_debt / get_debts / settle_debt` | Deudas (debo / me deben) |
-| `add_super_item / get_super_list / remove_super_items / clear_super_list` | Lista de supermercado |
+`usuarios`, `codigos_activacion`, `recordatorios`, y la data del usuario:
+`tareas`, `gastos`, `ingresos`, `gastos_fijos`, `deudas`, `supermercado`, `listados`.
 
-> Para operaciones de estado (eliminar, editar, gastos, etc.) el bot detecta la intención por palabras clave y **fuerza** el `tool_choice` correspondiente, porque el modelo no siempre llama estas funciones de forma confiable por sí solo.
+El SQL completo está en `schema.sql`. Todas tienen `chat_id` (FK a `usuarios`) y RLS
+con política permisiva (el backend usa la anon key, así que RLS no se bypassa).
+
+`usuarios`: chat_id (PK), email, nombre, access_token, refresh_token, token_expiry,
+estado_suscripcion (`trial`/`activo`/`inactivo`), fecha_vencimiento, genero, fecha_alta.
 
 ---
 
-## Datos por usuario en el Google Sheet
+## Configurar Google OAuth (solo Calendar)
 
-Cada usuario tiene un Google Sheet propio con tres pestañas, creadas automáticamente cuando se usan:
+1. [console.cloud.google.com](https://console.cloud.google.com) → habilitar **Google Calendar API**.
+2. **OAuth consent screen** → External → scopes: `openid`, `userinfo.email`, `calendar`
+   (solo `calendar` es "sensible" → verificación gratuita, sin auditoría CASA).
+3. **Credentials → OAuth client ID** (Web application) → redirect URI del callback.
+4. Guardar `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET`.
 
-| Pestaña | Columnas |
-|---------|----------|
-| `Tareas` | id, tarea, estado, prioridad, fecha |
-| `Gastos` | fecha, monto, categoria, descripcion, medio_pago |
-| `GastosFijos` | nombre, monto, categoria, dia_del_mes, activo, ultimo_mes_cargado |
+> Para producción hay que **publicar** la app (no dejarla en "Testing", donde el
+> refresh token vence a los 7 días) y pasar la verificación de Google.
 
 ---
 
@@ -231,15 +127,16 @@ Cada usuario tiene un Google Sheet propio con tres pestañas, creadas automátic
 
 | Variable | Descripción |
 |----------|-------------|
-| `TELEGRAM_TOKEN` | Token del bot de Telegram |
+| `TELEGRAM_TOKEN` | Token del bot |
 | `OPENAI_API_KEY` | API key de OpenAI |
-| `SUPABASE_URL` | URL del proyecto Supabase |
-| `SUPABASE_KEY` | Service role key de Supabase |
-| `GOOGLE_CLIENT_ID` | Client ID de OAuth |
-| `GOOGLE_CLIENT_SECRET` | Client Secret de OAuth |
-| `GOOGLE_REDIRECT_URI` | URL de callback OAuth |
-| `BASE_URL` | URL pública del servidor (para links de OAuth) |
-| `PAYMENT_LINK` | Link al sistema de pago |
+| `SUPABASE_URL` / `SUPABASE_KEY` | Proyecto Supabase (service_role key) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` | OAuth de Google |
+| `BASE_URL` | URL pública del servidor OAuth |
+| `MP_ACCESS_TOKEN` / `MP_PUBLIC_KEY` | MercadoPago (producción) |
+| `MP_SUB_PRICE` | Precio de la suscripción (ej. 4900) |
+| `MP_BACK_URL` / `SUBSCRIBE_URL` | URLs de la web |
+| `ADMIN_API_KEY` | Protege los endpoints `/admin/*` |
+| `RESEND_API_KEY` / `EMAIL_FROM` | Envío de emails (Resend, dominio verificado) |
 | `DAILY_SUMMARY_CHAT_ID` | chat_id del admin (habilita `/broadcast`) |
 
 ---
@@ -248,12 +145,17 @@ Cada usuario tiene un Google Sheet propio con tres pestañas, creadas automátic
 
 | Componente | Tecnología |
 |------------|------------|
-| Bot | python-telegram-bot v21+ async |
-| IA | OpenAI gpt-4.1-mini + function calling y visión |
-| Voz | OpenAI Whisper |
-| Datos del usuario | Google Sheets (gspread) — una hoja por usuario (pestañas Tareas, Gastos, GastosFijos, Ingresos, Deudas, Supermercado) |
+| Bot | python-telegram-bot v21+ async (polling) |
+| IA | OpenAI gpt-4.1-mini (function calling + visión), Whisper |
+| Datos del usuario | **Supabase (PostgreSQL)** |
 | Calendario | Google Calendar API |
-| Base de datos | Supabase (PostgreSQL) — tabla usuarios |
-| Auth | Google OAuth 2.0 (google-auth-oauthlib) |
-| Scheduler | APScheduler AsyncIOScheduler |
-| Servidor OAuth | FastAPI + uvicorn |
+| Auth | Google OAuth 2.0 |
+| Pagos | MercadoPago (suscripciones) |
+| Email | Resend |
+| Scheduler | APScheduler |
+| Servidor | FastAPI + uvicorn |
+| Hosting | Render |
+
+> Nota: cada mensaje pasa por un bucle multironda de tools (el modelo puede
+> encadenar acciones, ej. buscar un evento y editarlo, en el mismo turno). Para
+> las operaciones de estado se fuerza el `tool_choice` por detección de intención.
