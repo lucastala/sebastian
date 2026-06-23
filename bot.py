@@ -20,13 +20,14 @@ from telegram.ext import (
 )
 
 from database import (
+    activate_user,
     add_reminder,
-    create_user,
     delete_reminder,
     get_active_users,
     get_user,
     get_user_reminders,
     update_user_genero,
+    use_activation_code,
 )
 from texts import INSTRUCCIONES_TEXTO
 from google_services import (
@@ -83,7 +84,26 @@ MAX_TOOL_ROUNDS = 5
 
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "https://tu-link-de-pago.com")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+SUBSCRIBE_URL = os.getenv("SUBSCRIBE_URL", "https://www.chatsebastian.com")
 ARGENTINA_TZ = timezone(timedelta(hours=-3))
+
+# Código de activación: SEB- + 5 alfanuméricos
+_CODE_RE = re.compile(r"^SEB-[A-Z0-9]{5}$", re.IGNORECASE)
+
+WELCOME_NUEVO = (
+    "👋 ¡Hola! Soy Sebastian, tu asistente personal.\n\n"
+    "Si ya tenés tu código de activación, escribilo acá.\n\n"
+    f"Para suscribirte visitá: {SUBSCRIBE_URL}"
+)
+INACTIVO_MSG = (
+    "⚠️ Tu suscripción no está activa.\n\n"
+    "Si tenés un código de activación, escribilo acá.\n\n"
+    f"Para renovar visitá: {SUBSCRIBE_URL}"
+)
+
+
+def _looks_like_code(text: str) -> bool:
+    return bool(_CODE_RE.match(text.strip()))
 
 DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 MESES_ES = ["", "ene", "feb", "mar", "abr", "may", "jun",
@@ -2671,16 +2691,44 @@ async def _handle_photo(update: Update, user: dict) -> None:
 
 # ── Main handlers ─────────────────────────────────────────────────────────────
 
+async def _try_activate_code(update: Update, chat_id: int, nombre: str, code: str) -> None:
+    code = code.strip().upper()
+    ok = await use_activation_code(code, chat_id)
+    if not ok:
+        await update.message.reply_text("❌ Código inválido o ya utilizado.")
+        return
+    await activate_user(chat_id, nombre)
+    oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+    await update.message.reply_text(
+        "✅ ¡Código activado! Tu suscripción quedó activa por 30 días.\n\n"
+        f"Ahora conectá tu cuenta de Google para empezar:\n{oauth_url}"
+    )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if not message:
         return
 
     chat_id = update.effective_chat.id
+    nombre = update.effective_user.first_name or "Usuario"
     user = await get_user(chat_id)
+    text_in = (message.text or "").strip()
 
+    # Usuario nuevo (sin registro) → código o suscripción
     if user is None:
-        await _start_onboarding(update)
+        if _looks_like_code(text_in):
+            await _try_activate_code(update, chat_id, nombre, text_in)
+        else:
+            await message.reply_text(WELCOME_NUEVO)
+        return
+
+    # Suscripción no activa (inactivo) → puede ingresar un código para reactivar
+    if user.get("estado_suscripcion") not in ("activo", "trial"):
+        if _looks_like_code(text_in):
+            await _try_activate_code(update, chat_id, nombre, text_in)
+        else:
+            await message.reply_text(INACTIVO_MSG)
         return
 
     if not user.get("access_token"):
@@ -2688,12 +2736,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text(
             f"⚠️ Todavía no conectó su cuenta de Google.\n\n"
             f"Complete la configuración aquí:\n{oauth_url}"
-        )
-        return
-
-    if user.get("estado_suscripcion") not in ("activo", "trial"):
-        await message.reply_text(
-            f"⚠️ Su suscripción no está activa.\n\nActive su plan aquí:\n{PAYMENT_LINK}"
         )
         return
 
@@ -2726,14 +2768,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = await get_user(chat_id)
+    activo = bool(user) and user.get("estado_suscripcion") in ("activo", "trial")
 
-    if user and user.get("access_token"):
+    if activo and user.get("access_token"):
         await update.message.reply_text(
             "👋 ¡Hola! Ya está configurado y listo.\n\n" + INSTRUCCIONES_TEXTO,
             parse_mode="Markdown",
         )
+    elif activo:
+        oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+        await update.message.reply_text(
+            "✅ Tu suscripción está activa.\n\n"
+            f"Conectá tu cuenta de Google para empezar:\n{oauth_url}"
+        )
     else:
-        await _start_onboarding(update)
+        await update.message.reply_text(WELCOME_NUEVO)
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2750,30 +2799,15 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def reconectar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    nombre = update.effective_user.first_name or "Usuario"
-    if not await get_user(chat_id):
-        await create_user(chat_id, nombre)
+    user = await get_user(chat_id)
+    # Solo para usuarios con suscripción activa/trial (no es una vía para saltear el pago)
+    if not user or user.get("estado_suscripcion") not in ("activo", "trial"):
+        await update.message.reply_text(WELCOME_NUEVO)
+        return
     oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
     await update.message.reply_text(
         f"🔗 Haga clic aquí para reconectar su cuenta de Google:\n{oauth_url}\n\n"
         "Sus tareas y datos no se borrarán."
-    )
-
-
-async def _start_onboarding(update: Update) -> None:
-    chat_id = update.effective_chat.id
-    nombre = update.effective_user.first_name or "Usuario"
-
-    if not await get_user(chat_id):
-        await create_user(chat_id, nombre)
-
-    oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
-    await update.message.reply_text(
-        f"👋 ¡Hola {nombre}! Bienvenido a su asistente personal.\n\n"
-        f"Para empezar, necesito conectar su cuenta de Google. "
-        f"Esto me da acceso a su Calendar y crea su hoja de tareas en Google Sheets.\n\n"
-        f"👉 Haga clic aquí para autorizar:\n{oauth_url}\n\n"
-        f"Una vez que complete la autorización, ¡ya puede usar el bot!"
     )
 
 

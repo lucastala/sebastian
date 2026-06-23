@@ -17,6 +17,30 @@ CREATE TABLE IF NOT EXISTS public.usuarios (
 -- Si la tabla ya existía, agregá la columna de trato (señor/señora):
 ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS genero TEXT;
 
+-- Vencimiento de la suscripción (se setea a +30 días al activar)
+ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS fecha_vencimiento TIMESTAMPTZ;
+
+-- Códigos de activación (los genera el webhook de MercadoPago o el admin)
+CREATE TABLE IF NOT EXISTS public.codigos_activacion (
+    id              BIGSERIAL    PRIMARY KEY,
+    codigo          TEXT         NOT NULL UNIQUE,
+    email_comprador TEXT,
+    chat_id         BIGINT,
+    estado          TEXT         NOT NULL DEFAULT 'sin_usar'
+                        CHECK (estado IN ('sin_usar', 'usado')),
+    fecha_creacion  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    fecha_uso       TIMESTAMPTZ,
+    mp_payment_id   TEXT
+);
+
+ALTER TABLE public.codigos_activacion ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Service role full access codigos"
+    ON public.codigos_activacion
+    FOR ALL
+    USING (true)
+    WITH CHECK (true);
+
 -- Index for fast subscription lookups (used by the daily summary)
 CREATE INDEX IF NOT EXISTS idx_usuarios_estado
     ON public.usuarios (estado_suscripcion);

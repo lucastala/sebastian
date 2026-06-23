@@ -1,6 +1,8 @@
 import os
 import logging
-from datetime import datetime, timezone
+import secrets
+import string
+from datetime import datetime, timedelta, timezone
 
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -170,3 +172,160 @@ async def delete_reminder(reminder_id: int) -> None:
         get_supabase().table("recordatorios").delete().eq("id", reminder_id).execute()
     except Exception as e:
         logger.error(f"Error deleting reminder {reminder_id}: {e}")
+
+
+# ── Suscripción / códigos de activación ───────────────────────────────────────
+
+SUB_DAYS = 30
+
+
+def _generate_code() -> str:
+    """Código formato SEB-XXXXX (5 alfanuméricos en mayúscula)."""
+    alphabet = string.ascii_uppercase + string.digits
+    return "SEB-" + "".join(secrets.choice(alphabet) for _ in range(5))
+
+
+async def _code_exists(codigo: str) -> bool:
+    try:
+        result = get_supabase().table("codigos_activacion").select("id").eq(
+            "codigo", codigo
+        ).execute()
+        return bool(result.data)
+    except Exception as e:
+        logger.error(f"Error checking code {codigo}: {e}")
+        return False
+
+
+async def create_activation_code(email: str, mp_payment_id: str | None = None) -> str | None:
+    """Genera un código único y lo guarda como sin_usar. Devuelve el código."""
+    try:
+        codigo = _generate_code()
+        for _ in range(10):  # asegurar unicidad
+            if not await _code_exists(codigo):
+                break
+            codigo = _generate_code()
+        get_supabase().table("codigos_activacion").insert({
+            "codigo": codigo,
+            "email_comprador": email,
+            "estado": "sin_usar",
+            "mp_payment_id": mp_payment_id,
+        }).execute()
+        return codigo
+    except Exception as e:
+        logger.error(f"Error creating activation code for {email}: {e}")
+        return None
+
+
+async def get_activation_code(codigo: str) -> dict | None:
+    try:
+        result = get_supabase().table("codigos_activacion").select("*").eq(
+            "codigo", codigo.upper().strip()
+        ).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        logger.error(f"Error fetching code {codigo}: {e}")
+        return None
+
+
+async def use_activation_code(codigo: str, chat_id: int) -> bool:
+    """Marca un código como usado (si estaba sin_usar). Devuelve True si se pudo."""
+    try:
+        row = await get_activation_code(codigo)
+        if not row or row.get("estado") != "sin_usar":
+            return False
+        get_supabase().table("codigos_activacion").update({
+            "estado": "usado",
+            "chat_id": chat_id,
+            "fecha_uso": datetime.now(timezone.utc).isoformat(),
+        }).eq("codigo", row["codigo"]).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error using code {codigo}: {e}")
+        return False
+
+
+async def activate_user(chat_id: int, nombre: str, dias: int = SUB_DAYS) -> None:
+    """Marca al usuario como activo con vencimiento en `dias` días (lo crea si no existe)."""
+    venc = (datetime.now(timezone.utc) + timedelta(days=dias)).isoformat()
+    existing = await get_user(chat_id)
+    if existing:
+        get_supabase().table("usuarios").update({
+            "estado_suscripcion": "activo",
+            "fecha_vencimiento": venc,
+        }).eq("chat_id", chat_id).execute()
+    else:
+        get_supabase().table("usuarios").insert({
+            "chat_id": chat_id,
+            "nombre": nombre,
+            "estado_suscripcion": "activo",
+            "fecha_vencimiento": venc,
+            "fecha_alta": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+
+
+async def get_user_by_email(email: str) -> dict | None:
+    try:
+        result = get_supabase().table("usuarios").select("*").eq(
+            "email", email
+        ).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        logger.error(f"Error fetching user by email {email}: {e}")
+        return None
+
+
+async def extend_subscription_by_email(email: str, dias: int = SUB_DAYS) -> int | None:
+    """Para pagos recurrentes: extiende el vencimiento del usuario con ese email.
+    Devuelve el chat_id si se encontró, o None."""
+    # Buscar primero por código usado (mapea email → chat_id), luego por usuario.
+    chat_id = None
+    try:
+        result = get_supabase().table("codigos_activacion").select("chat_id").eq(
+            "email_comprador", email
+        ).not_.is_("chat_id", "null").order("fecha_uso", desc=True).execute()
+        if result.data:
+            chat_id = result.data[0]["chat_id"]
+    except Exception as e:
+        logger.error(f"Error mapping email→chat_id for {email}: {e}")
+
+    if chat_id is None:
+        user = await get_user_by_email(email)
+        chat_id = user["chat_id"] if user else None
+
+    if chat_id is None:
+        return None
+
+    venc = (datetime.now(timezone.utc) + timedelta(days=dias)).isoformat()
+    get_supabase().table("usuarios").update({
+        "estado_suscripcion": "activo",
+        "fecha_vencimiento": venc,
+    }).eq("chat_id", chat_id).execute()
+    return chat_id
+
+
+async def get_expired_active_users() -> list[dict]:
+    """Usuarios activos cuyo vencimiento ya pasó."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        result = (
+            get_supabase()
+            .table("usuarios")
+            .select("*")
+            .eq("estado_suscripcion", "activo")
+            .not_.is_("fecha_vencimiento", "null")
+            .lt("fecha_vencimiento", now)
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        logger.error(f"Error fetching expired users: {e}")
+        return []
+
+
+async def set_user_inactive(chat_id: int) -> None:
+    try:
+        get_supabase().table("usuarios").update({
+            "estado_suscripcion": "inactivo",
+        }).eq("chat_id", chat_id).execute()
+    except Exception as e:
+        logger.error(f"Error setting user {chat_id} inactive: {e}")

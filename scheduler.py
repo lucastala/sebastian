@@ -9,7 +9,9 @@ from telegram import Bot
 from database import (
     get_active_users,
     get_due_reminders,
+    get_expired_active_users,
     mark_reminder_sent,
+    set_user_inactive,
 )
 from google_services import (
     get_balance,
@@ -215,6 +217,27 @@ async def send_monthly_summary(bot: Bot) -> None:
             logger.error(f"Error sending monthly summary to {user['chat_id']}: {e}")
 
 
+async def check_expired_subscriptions(bot: Bot) -> None:
+    """Marca como inactivos a los usuarios cuya suscripción venció y les avisa."""
+    expired = await get_expired_active_users()
+    if not expired:
+        return
+    logger.info(f"Expiring {len(expired)} subscriptions")
+    for user in expired:
+        chat_id = user["chat_id"]
+        try:
+            await set_user_inactive(chat_id)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "Tu suscripción venció. Renovála en https://www.chatsebastian.com "
+                    "o ingresá un nuevo código de activación."
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Error expiring subscription for {chat_id}: {e}")
+
+
 async def check_reminders(bot: Bot) -> None:
     due = await get_due_reminders()
     for r in due:
@@ -268,6 +291,14 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="monthly_summary",
         name="Monthly Expense Summary",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_expired_subscriptions,
+        CronTrigger(hour=0, minute=0, timezone=ARGENTINA_TZ),
+        args=[bot],
+        id="expired_subscriptions",
+        name="Expire Subscriptions",
         replace_existing=True,
     )
     return scheduler

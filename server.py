@@ -8,12 +8,21 @@ import secrets
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from google_auth_oauthlib.flow import Flow
 
-from database import get_user, update_user_sheet_id, update_user_tokens
+from database import (
+    create_activation_code,
+    extend_subscription_by_email,
+    get_user,
+    update_user_sheet_id,
+    update_user_tokens,
+)
 from google_services import create_user_sheet
+from mercadopago_service import create_subscription_link, verify_payment
 from texts import INSTRUCCIONES_TEXTO
+
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
 load_dotenv()
 
@@ -204,3 +213,114 @@ async def oauth_callback(request: Request):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── MercadoPago: webhook, admin y link de pago ────────────────────────────────
+
+async def _notify_telegram(chat_id: int, text: str) -> None:
+    token = os.getenv("TELEGRAM_TOKEN")
+    if not token or not chat_id:
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=10,
+            )
+    except Exception as e:
+        logger.error(f"Failed to notify telegram {chat_id}: {e}")
+
+
+@app.post("/webhook/mercadopago")
+async def mercadopago_webhook(request: Request):
+    """Recibe la notificación de MercadoPago, verifica el pago y, si está aprobado,
+    genera un código de activación y se lo manda por email al comprador."""
+    # MP manda el id del pago en el body (type=payment) o en query (?id=&topic=)
+    payment_id = None
+    try:
+        body = await request.json()
+        if body.get("type") == "payment" or body.get("action", "").startswith("payment"):
+            payment_id = str(body.get("data", {}).get("id") or body.get("id") or "")
+    except Exception:
+        body = {}
+    if not payment_id:
+        qp = request.query_params
+        if qp.get("topic") in ("payment", "merchant_order") or qp.get("type") == "payment":
+            payment_id = qp.get("id") or qp.get("data.id")
+
+    if not payment_id:
+        # Otros eventos (suscripción creada, etc.) — los ignoramos pero respondemos OK
+        return JSONResponse({"ok": True, "ignored": True})
+
+    payment = await verify_payment(payment_id)
+    if not payment:
+        logger.error(f"Webhook: no se pudo verificar el pago {payment_id}")
+        return JSONResponse({"ok": False}, status_code=200)
+
+    status = payment.get("status")
+    email = (payment.get("payer", {}) or {}).get("email", "")
+    logger.info(f"Webhook MP pago {payment_id}: status={status} email={email}")
+
+    if status != "approved":
+        logger.info(f"Pago {payment_id} no aprobado ({status}), no se hace nada")
+        return JSONResponse({"ok": True, "status": status})
+
+    # Pago aprobado. ¿Es recurrente de un usuario ya activo? → extender vencimiento.
+    extended_chat = await extend_subscription_by_email(email) if email else None
+    if extended_chat:
+        logger.info(f"Suscripción extendida 30 días para chat_id={extended_chat} ({email})")
+        await _notify_telegram(
+            extended_chat, "✅ Recibimos tu pago. Tu suscripción se renovó por 30 días más. ¡Gracias!"
+        )
+        return JSONResponse({"ok": True, "renewed": True})
+
+    # Pago nuevo → generar código de activación y mandarlo por email
+    codigo = await create_activation_code(email or "desconocido", mp_payment_id=payment_id)
+    if not codigo:
+        logger.error(f"No se pudo generar código para el pago {payment_id}")
+        return JSONResponse({"ok": False}, status_code=200)
+
+    # TODO: enviar el código por email al comprador. Por ahora se loguea bien visible.
+    logger.info(
+        "\n========================================\n"
+        f"  CÓDIGO DE ACTIVACIÓN GENERADO\n"
+        f"  Email: {email}\n"
+        f"  Código: {codigo}\n"
+        f"  Pago MP: {payment_id}\n"
+        "========================================\n"
+    )
+    return JSONResponse({"ok": True, "codigo": codigo})
+
+
+@app.post("/admin/generar-codigo")
+async def admin_generar_codigo(request: Request):
+    """Genera códigos de activación manualmente. Requiere header X-Admin-Key."""
+    if request.headers.get("X-Admin-Key") != ADMIN_API_KEY or not ADMIN_API_KEY:
+        return JSONResponse({"error": "no autorizado"}, status_code=401)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    email = data.get("email", "")
+    cantidad = int(data.get("cantidad", 1) or 1)
+    cantidad = max(1, min(cantidad, 50))
+
+    codigos = []
+    for _ in range(cantidad):
+        c = await create_activation_code(email or "manual")
+        if c:
+            codigos.append(c)
+    return JSONResponse({"codigos": codigos})
+
+
+@app.get("/pago/suscripcion")
+async def pago_suscripcion(chat_id: int):
+    """Genera un link de suscripción de MercadoPago para el usuario y lo redirige."""
+    init_point = await create_subscription_link(chat_id)
+    if not init_point:
+        return HTMLResponse(
+            _ERROR_HTML.format(message="No se pudo generar el link de pago. Intentá de nuevo."),
+            status_code=500,
+        )
+    return RedirectResponse(init_point)
