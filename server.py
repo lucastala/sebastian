@@ -18,6 +18,7 @@ from database import (
     update_user_sheet_id,
     update_user_tokens,
 )
+from email_service import send_activation_code
 from google_services import create_user_sheet
 from mercadopago_service import (
     create_subscription_link,
@@ -285,7 +286,6 @@ async def mercadopago_webhook(request: Request):
         logger.error(f"No se pudo generar código para el pago {payment_id}")
         return JSONResponse({"ok": False}, status_code=200)
 
-    # TODO: enviar el código por email al comprador. Por ahora se loguea bien visible.
     logger.info(
         "\n========================================\n"
         f"  CÓDIGO DE ACTIVACIÓN GENERADO\n"
@@ -294,7 +294,9 @@ async def mercadopago_webhook(request: Request):
         f"  Pago MP: {payment_id}\n"
         "========================================\n"
     )
-    return JSONResponse({"ok": True, "codigo": codigo})
+    # Enviar el código por email al comprador (queda logueado igual como respaldo)
+    enviado = await send_activation_code(email, codigo)
+    return JSONResponse({"ok": True, "codigo": codigo, "email_enviado": enviado})
 
 
 @app.post("/admin/generar-codigo")
