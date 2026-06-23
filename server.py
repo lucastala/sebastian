@@ -14,12 +14,9 @@ from google_auth_oauthlib.flow import Flow
 from database import (
     create_activation_code,
     extend_subscription_by_email,
-    get_user,
-    update_user_sheet_id,
     update_user_tokens,
 )
 from email_service import send_activation_code
-from google_services import create_user_sheet
 from mercadopago_service import (
     create_subscription_link,
     create_subscription_plan,
@@ -43,8 +40,6 @@ SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
 ]
 
 _SUCCESS_HTML = """
@@ -185,16 +180,6 @@ async def oauth_callback(request: Request):
         token_expiry=credentials.expiry,
         email=email,
     )
-
-    # Only create sheet if user doesn't have one yet
-    existing_user = await get_user(chat_id)
-    if not existing_user or not existing_user.get("sheets_id"):
-        try:
-            sheet_id = await create_user_sheet(credentials)
-            await update_user_sheet_id(chat_id, sheet_id)
-            logger.info(f"Created sheet {sheet_id} for chat_id={chat_id}")
-        except Exception as e:
-            logger.error(f"Failed to create sheet for chat_id={chat_id}: {e}")
 
     telegram_token = os.getenv("TELEGRAM_TOKEN")
     if telegram_token:

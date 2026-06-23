@@ -1201,16 +1201,11 @@ def _build_calendar_keyboard(task_id: str, year: int, month: int) -> InlineKeybo
 async def build_tasks_footer(user: dict) -> str:
     try:
         tasks = await get_pending_tasks(user)
-    except GoogleAuthExpiredError:
-        return _session_expired_text(user["chat_id"])
     except Exception as e:
         logger.error(
             f"Error fetching tasks for user {user.get('chat_id')}: {type(e).__name__}: {e}"
         )
-        return (
-            "⚠️ No pude acceder a su planilla. Probá reconectar su cuenta con /reconectar; "
-            "si sigue, avisame."
-        )
+        return "⚠️ No pude cargar las tareas. Intente de nuevo en un momento."
 
     if not tasks:
         return "No tiene tareas pendientes.\n\nUse .texto para agregar una tarea."
