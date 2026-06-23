@@ -13,11 +13,11 @@ from database import (
     mark_reminder_sent,
     set_user_inactive,
 )
-from google_services import (
+from google_services import get_today_events
+from data_store import (
     get_balance,
     get_expenses,
     get_pending_tasks,
-    get_today_events,
     log_due_fixed_expenses,
 )
 
