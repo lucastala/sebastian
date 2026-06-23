@@ -23,7 +23,8 @@ MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN")
 MP_BASE = "https://api.mercadopago.com"
 
 SUB_REASON = "Sebastian - Plan Mensual"
-SUB_PRICE = 250000
+# Precio configurable: poné MP_SUB_PRICE=1 en el .env/Render para probar
+SUB_PRICE = float(os.getenv("MP_SUB_PRICE", "250000"))
 SUB_CURRENCY = "ARS"
 # A dónde vuelve el usuario después de pagar
 BACK_URL = os.getenv("MP_BACK_URL", "https://www.chatsebastian.com")

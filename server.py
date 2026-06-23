@@ -19,7 +19,11 @@ from database import (
     update_user_tokens,
 )
 from google_services import create_user_sheet
-from mercadopago_service import create_subscription_link, verify_payment
+from mercadopago_service import (
+    create_subscription_link,
+    create_subscription_plan,
+    verify_payment,
+)
 from texts import INSTRUCCIONES_TEXTO
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
@@ -312,6 +316,21 @@ async def admin_generar_codigo(request: Request):
         if c:
             codigos.append(c)
     return JSONResponse({"codigos": codigos})
+
+
+@app.post("/admin/crear-plan")
+async def admin_crear_plan(request: Request):
+    """Crea el plan de suscripción (una vez) y devuelve el link público para suscribirse."""
+    if request.headers.get("X-Admin-Key") != ADMIN_API_KEY or not ADMIN_API_KEY:
+        return JSONResponse({"error": "no autorizado"}, status_code=401)
+    plan = await create_subscription_plan()
+    if not plan:
+        return JSONResponse({"error": "no se pudo crear el plan (ver logs)"}, status_code=500)
+    return JSONResponse({
+        "id": plan.get("id"),
+        "init_point": plan.get("init_point"),
+        "sandbox_init_point": plan.get("sandbox_init_point"),
+    })
 
 
 @app.get("/pago/suscripcion")
