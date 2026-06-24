@@ -1233,7 +1233,10 @@ async def build_tasks_footer(user: dict) -> str:
         return "⚠️ No pude cargar las tareas. Intente de nuevo en un momento."
 
     if not tasks:
-        return "No tiene tareas pendientes.\n\nUse .texto para agregar una tarea."
+        return (
+            "No tiene tareas pendientes.\n\n"
+            "✏️ Para agregar una, escriba un punto y la tarea. Ej: \".comprar pan\""
+        )
 
     lines = ["📋 *Tareas pendientes:*"]
     for i, task in enumerate(_sort_tasks(tasks), 1):
@@ -1242,7 +1245,10 @@ async def build_tasks_footer(user: dict) -> str:
             lines.append(f"{i}. *{_format_fecha(fecha)}* — {task['tarea']}")
         else:
             lines.append(f"{i}. {task['tarea']}")
-    lines.append("\nUse .texto para agregar una tarea. Use .número para eliminar.")
+    lines.append(
+        "\n✏️ *Agregar:* un punto y la tarea → \".comprar pan\"\n"
+        "🗑️ *Borrar:* un punto y el número → \".2\""
+    )
     return "\n".join(lines)
 
 
@@ -2477,7 +2483,8 @@ async def _route_text(
         else:
             footer = await build_tasks_footer(user)
             await message.reply_text(
-                "⚠️ Use .texto para agregar o .número para eliminar.\n\n" + footer,
+                "⚠️ Para agregar, un punto y la tarea (\".comprar pan\"). "
+                "Para borrar, un punto y el número (\".2\").\n\n" + footer,
                 parse_mode="Markdown",
             )
         return

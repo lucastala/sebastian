@@ -83,7 +83,8 @@ async def send_daily_summary(bot: Bot) -> None:
                 f"☀️ ¡Buenos días! Este es su resumen de hoy:\n\n"
                 f"{events_block}\n\n"
                 f"{tasks_block}\n\n"
-                f"Use .texto para agregar una tarea. Use .número para eliminar."
+                f"✏️ Agregar: un punto y la tarea (.comprar pan).  "
+                f"🗑️ Borrar: un punto y el número (.2)."
             )
 
             await bot.send_message(chat_id=user["chat_id"], text=text)
