@@ -1858,7 +1858,9 @@ async def handle_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         header = "✅ Sin fecha límite\n\n"
 
     footer = await build_tasks_footer(user)
-    await query.edit_message_text(header + footer, parse_mode="Markdown")
+    await query.edit_message_text(
+        header + footer, parse_mode="Markdown", reply_markup=_tasks_help_kb()
+    )
 
 
 # ── Menú interactivo ──────────────────────────────────────────────────────────
@@ -2463,7 +2465,9 @@ async def _route_text(
                 else f"⚠️ No encontré la tarea n.° {pos}.\n\n"
             )
             footer = await build_tasks_footer(user)
-            await message.reply_text(prefix + footer, parse_mode="Markdown")
+            await message.reply_text(
+                prefix + footer, parse_mode="Markdown", reply_markup=_tasks_help_kb()
+            )
 
         elif content:
             task_id = await add_task(user, content)
@@ -2485,7 +2489,7 @@ async def _route_text(
             await message.reply_text(
                 "⚠️ Para agregar, un punto y la tarea (\".comprar pan\"). "
                 "Para borrar, un punto y el número (\".2\").\n\n" + footer,
-                parse_mode="Markdown",
+                parse_mode="Markdown", reply_markup=_tasks_help_kb(),
             )
         return
 
@@ -2534,13 +2538,18 @@ async def _route_text(
     # The tasks list is only appended when the list actually changed.
     footer = await build_tasks_footer(user) if show_tasks else None
     full_text = reply + ("\n\n" + footer if footer else "")
+    # When the full list rides along and the action didn't attach its own
+    # keyboard, add the manual button so it shows with every complete list.
+    footer_kb = _tasks_help_kb() if (footer and keyboard is None) else None
     try:
-        await message.reply_text(full_text, parse_mode="Markdown", reply_markup=keyboard)
+        await message.reply_text(
+            full_text, parse_mode="Markdown", reply_markup=keyboard or footer_kb
+        )
     except Exception:
         # Reply may contain special chars — send plain, then footer with Markdown
         await message.reply_text(reply, reply_markup=keyboard)
         if footer:
-            await message.reply_text(footer, parse_mode="Markdown")
+            await message.reply_text(footer, parse_mode="Markdown", reply_markup=footer_kb)
 
 
 # ── Create event conflict confirmation callback ───────────────────────────────
@@ -2687,7 +2696,7 @@ async def _photo_tareas(message, user: dict, data: dict) -> None:
     footer = await build_tasks_footer(user)
     await message.reply_text(
         f"✅ Agregué {len(added)} tarea(s) desde la foto:\n{lines}\n\n{footer}",
-        parse_mode="Markdown",
+        parse_mode="Markdown", reply_markup=_tasks_help_kb(),
     )
 
 
