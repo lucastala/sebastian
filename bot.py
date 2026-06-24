@@ -29,7 +29,7 @@ from database import (
     update_user_genero,
     use_activation_code,
 )
-from texts import INSTRUCCIONES_TEXTO
+from texts import INSTRUCCIONES_TEXTO, MANUAL_TAREAS
 from google_services import (
     GoogleAuthExpiredError,
     create_event,
@@ -1919,7 +1919,7 @@ def _tasks_help_kb() -> InlineKeyboardMarkup:
     """Botón al pie de la lista de tareas — por si Sebastian no entiende algo,
     que el usuario pueda abrir el manual y no se frustre."""
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help")
+        InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help_tareas")
     ]])
 
 
@@ -2126,7 +2126,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text(
             footer, parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help")],
+                [InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help_tareas")],
                 [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
             ]),
         )
@@ -2298,6 +2298,16 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+
+    if data == "menu_help_tareas":
+        await query.edit_message_text(
+            MANUAL_TAREAS, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📖 Instrucciones de todas las funciones", callback_data="menu_help")],
+                [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
+            ]),
+        )
+        return
 
     if data == "menu_help":
         await query.edit_message_text(

@@ -1,5 +1,31 @@
 """Textos compartidos entre el bot y el servidor de OAuth."""
 
+# Manual corto que se abre desde el botón al pie de la lista de tareas.
+# Solo lo esencial del día a día; el botón de abajo abre INSTRUCCIONES_TEXTO completo.
+MANUAL_TAREAS = (
+    "📖 *Guía rápida*\n\n"
+    "*📋 Tareas*\n"
+    "• Anótelas hablando: \"anotá comprar pan\", \"tengo que llamar al médico\"\n"
+    "• A mano: un punto adelante → \".comprar pan\"\n"
+    "• Con vencimiento: \"agregá pagar la luz, vence el lunes\"\n"
+    "• Verlas: \"mostrame la lista\" (o \".tareas\")\n"
+    "• Eliminar: punto y número → \".2\" (o \"borrá la tarea 2\")\n"
+    "• Editar: \"renombrá la tarea 1...\", \"ponele fecha el viernes a la tarea 3\"\n\n"
+    "*⏰ Recordatorios*\n"
+    "• \"recordame llamar al médico mañana a las 3\"\n"
+    "• \"avisame a las 18 que saque la carne\"\n"
+    "• \"mis recordatorios\" para verlos o cancelarlos\n\n"
+    "*📅 Eventos (calendario)*\n"
+    "• Crear: \"agendá reunión el viernes a las 10\" (le aviso si se pisa con otro)\n"
+    "• Ver: \"qué tengo hoy\", \"qué tengo el martes\"\n"
+    "• Editar/eliminar: \"cambiá la hora de la reunión\", \"eliminá el evento X\"\n"
+    "• Le aviso ~30 min antes de cada evento ⏰\n\n"
+    "*🤔 ¿Tarea, recordatorio o evento?*\n"
+    "• Sin hora → 📋 *tarea* (queda en su lista). Ej: \"comprar pan\"\n"
+    "• \"recordame/avisame\" + una hora → ⏰ *recordatorio* (le aviso a esa hora)\n"
+    "• Una cita o reunión con día y hora → 📅 *evento* (va al calendario)"
+)
+
 INSTRUCCIONES_TEXTO = (
     "📖 *Guía de Sebastian*\n\n"
     "A su servicio. Hábleme con naturalidad —por texto o audio 🎤— o envíeme "
