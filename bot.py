@@ -260,6 +260,31 @@ def _is_event_edit_intent(text: str) -> bool:
     return any(v in t for v in _EVENT_EDIT_VERBS) and any(n in t for n in _EVENT_NOUNS)
 
 
+# Imperative "agendá…" forms — strong signal of a NEW calendar event. We avoid the
+# bare noun "agenda" ("mi agenda") and past forms ("agendado") on purpose.
+_EVENT_CREATE_VERBS = (
+    "agendá", "agendame", "agéndame", "agendámelo", "agendamelo", "agendalo",
+    "agendala", "agendar", "creá un evento", "crea un evento", "crear un evento",
+    "creame un evento", "creáme un evento", "nuevo evento", "nueva reunión",
+    "nueva reunion", "nuevo turno",
+)
+_EVENT_NOUN_CREATE_VERBS = (
+    "poné", "pone", "poneme", "ponme", "agregá", "agrega", "agregame",
+    "anotá", "anota", "anotame", "meté", "mete", "sumá", "creá", "crea",
+)
+
+
+def _is_event_create_intent(text: str) -> bool:
+    t = text.lower()
+    # Never grab edits/deletes of an existing event.
+    if _is_event_edit_intent(text) or _is_event_delete_intent(text):
+        return False
+    if any(v in t for v in _EVENT_CREATE_VERBS):
+        return True
+    # "poné/agregá/anotá una reunión/turno/cita ..." → new event
+    return any(n in t for n in _EVENT_NOUNS) and any(v in t for v in _EVENT_NOUN_CREATE_VERBS)
+
+
 def _is_expense_query_intent(text: str) -> bool:
     t = text.lower()
     return any(p in t for p in _EXPENSE_QUERY_PHRASES)
@@ -1680,6 +1705,8 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "add_reminder"}}
     elif _is_task_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_task"}}
+    elif _is_event_create_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "create_event"}}
     elif _is_fixed_query_intent(text):
         tool_choice = {"type": "function", "function": {"name": "get_fixed_expenses"}}
     elif _is_fixed_cancel_intent(text):
@@ -1888,6 +1915,14 @@ def _menu_back(target: str, label: str = "⬅️ Volver al menú") -> InlineKeyb
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=target)]])
 
 
+def _tasks_help_kb() -> InlineKeyboardMarkup:
+    """Botón al pie de la lista de tareas — por si Sebastian no entiende algo,
+    que el usuario pueda abrir el manual y no se frustre."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help")
+    ]])
+
+
 def _genero_label(user: dict) -> str:
     g = (user.get("genero") or "").lower()
     return {"f": "Femenino (señora)", "m": "Masculino (señor)"}.get(g, "Sin definir")
@@ -2089,7 +2124,11 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "menu_tareas":
         footer = await build_tasks_footer(user)
         await query.edit_message_text(
-            footer, parse_mode="Markdown", reply_markup=_menu_back("menu_main"),
+            footer, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help")],
+                [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
+            ]),
         )
         return
 
@@ -2396,7 +2435,7 @@ async def _route_text(
 
         if content.lower() in ("tareas", "lista"):
             footer = await build_tasks_footer(user)
-            await message.reply_text(footer, parse_mode="Markdown")
+            await message.reply_text(footer, parse_mode="Markdown", reply_markup=_tasks_help_kb())
             return
 
         if re.match(r"^\d+$", content):
@@ -2445,7 +2484,7 @@ async def _route_text(
     # Pedido explícito de la lista de tareas
     if _is_task_list_request(text):
         footer = await build_tasks_footer(user)
-        await message.reply_text(footer, parse_mode="Markdown")
+        await message.reply_text(footer, parse_mode="Markdown", reply_markup=_tasks_help_kb())
         return
 
     # Pedido de la lista del súper → mostrarla con botones (incluye "➕ Agregar")
