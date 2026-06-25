@@ -33,13 +33,10 @@ CREATE TABLE IF NOT EXISTS public.codigos_activacion (
     mp_payment_id   TEXT
 );
 
+-- RLS prendido y SIN políticas: el backend usa la SECRET key (sb_secret_/service_role),
+-- que se saltea RLS. NO crear políticas USING(true): le abrirían la tabla a la llave
+-- pública (sb_publishable_/anon) y expondrían los datos.
 ALTER TABLE public.codigos_activacion ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Service role full access codigos"
-    ON public.codigos_activacion
-    FOR ALL
-    USING (true)
-    WITH CHECK (true);
 
 -- Index for fast subscription lookups (used by the daily summary)
 CREATE INDEX IF NOT EXISTS idx_usuarios_estado
@@ -60,19 +57,6 @@ CREATE INDEX IF NOT EXISTS idx_recordatorios_pendientes
 
 ALTER TABLE public.recordatorios ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Service role full access recordatorios"
-    ON public.recordatorios
-    FOR ALL
-    USING (true)
-    WITH CHECK (true);
-
--- Enable Row Level Security
+-- RLS prendido y sin políticas (ver nota arriba): el backend usa la SECRET key
+-- y se saltea RLS; la llave pública queda sin acceso.
 ALTER TABLE public.usuarios ENABLE ROW LEVEL SECURITY;
-
--- The bot uses the service-role key, so RLS is bypassed for the backend.
--- This policy is a safety net if the anon key is used by mistake.
-CREATE POLICY "Service role full access"
-    ON public.usuarios
-    FOR ALL
-    USING (true)
-    WITH CHECK (true);
