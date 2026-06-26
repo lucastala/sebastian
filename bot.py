@@ -27,6 +27,7 @@ from database import (
     get_active_users,
     get_user,
     get_user_reminders,
+    update_user_resumen,
     use_activation_code,
 )
 from texts import INSTRUCCIONES_TEXTO, MANUAL_TAREAS
@@ -2008,6 +2009,11 @@ def _tasks_help_kb() -> InlineKeyboardMarkup:
     ]])
 
 
+def _resumen_label(user: dict) -> str:
+    hr = user.get("hora_resumen")
+    return f"{hr:02d}:00" if isinstance(hr, int) else "Apagado"
+
+
 def _format_config(user: dict) -> str:
     estado = (user.get("estado_suscripcion") or "—").lower()
     estado_label = {"activo": "Activa ✅", "trial": "Prueba 🎁", "inactivo": "Inactiva ⛔"}.get(
@@ -2026,6 +2032,7 @@ def _format_config(user: dict) -> str:
     google = "Conectada ✅" if user.get("access_token") else "No conectada ❌"
     return (
         "⚙️ *Configuración*\n\n"
+        f"🌅 Resumen diario: *{_resumen_label(user)}*\n"
         f"🔑 Suscripción: *{estado_label}*{venc_line}\n"
         f"🔗 Cuenta de Google: *{google}*"
     )
@@ -2033,9 +2040,27 @@ def _format_config(user: dict) -> str:
 
 def _build_config_menu(user: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🌅 Resumen diario: {_resumen_label(user)}", callback_data="menu_resumen")],
         [InlineKeyboardButton("🔗 Reconectar Google", callback_data="menu_reconnect")],
         [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
     ])
+
+
+# Horas ofrecidas para el resumen diario.
+_RESUMEN_HORAS = [6, 7, 8, 9, 12, 18, 20, 21, 22]
+
+
+def _build_resumen_menu() -> InlineKeyboardMarkup:
+    rows, fila = [], []
+    for h in _RESUMEN_HORAS:
+        fila.append(InlineKeyboardButton(f"{h:02d}:00", callback_data=f"menu_setres_{h}"))
+        if len(fila) == 3:
+            rows.append(fila); fila = []
+    if fila:
+        rows.append(fila)
+    rows.append([InlineKeyboardButton("🔕 Apagar resumen", callback_data="menu_setres_off")])
+    rows.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_config")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _format_categoria_gastos(cat: str, data: dict) -> str:
@@ -2418,6 +2443,25 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "🔗 Para reconectar su cuenta de Google, abra este enlace "
             f"(sus datos no se borran):\n{oauth_url}",
             reply_markup=_menu_back("menu_config"),
+        )
+        return
+
+    if data == "menu_resumen":
+        await query.edit_message_text(
+            "🌅 *Resumen diario*\n\n¿A qué hora quiere recibir el resumen del día "
+            "(eventos + tareas)? O apáguelo si prefiere no recibirlo.",
+            parse_mode="Markdown", reply_markup=_build_resumen_menu(),
+        )
+        return
+
+    if data.startswith("menu_setres_"):
+        val = data.rsplit("_", 1)[1]
+        hora = None if val == "off" else int(val)
+        await update_user_resumen(chat_id, hora)
+        user = await get_user(chat_id)
+        await query.edit_message_text(
+            _format_config(user), parse_mode="Markdown",
+            reply_markup=_build_config_menu(user),
         )
         return
 

@@ -48,10 +48,15 @@ EVENT_REMINDER_MINUTES = 30
 
 
 async def send_daily_summary(bot: Bot) -> None:
+    # Corre cada hora; le manda solo a quienes tienen ESTA hora configurada.
+    current_hour = datetime.now(ARG_TZ).hour
     users = await get_active_users()
-    logger.info(f"Sending daily summary to {len(users)} users")
+    destinatarios = [u for u in users if u.get("hora_resumen") == current_hour]
+    if not destinatarios:
+        return
+    logger.info(f"Sending daily summary ({current_hour:02d}:00) to {len(destinatarios)} users")
 
-    for user in users:
+    for user in destinatarios:
         if not user.get("access_token"):
             continue
         try:
@@ -256,7 +261,7 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=ARGENTINA_TZ)
     scheduler.add_job(
         send_daily_summary,
-        CronTrigger(hour=8, minute=0, timezone=ARGENTINA_TZ),
+        CronTrigger(minute=0, timezone=ARGENTINA_TZ),  # cada hora; filtra por hora de cada usuario
         args=[bot],
         id="daily_summary",
         name="Daily Morning Summary",
