@@ -2562,6 +2562,10 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    if data == "menu_delete_cancel":
+        await query.edit_message_text("❌ Cancelado. No se borró nada.")
+        return
+
     if data == "menu_delete_yes":
         await delete_all_user_data(user)
         await wipe_user_account_extras(chat_id)
@@ -3132,6 +3136,26 @@ async def reconectar_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def borrar_cuenta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Comando mencionado en la política de privacidad. Dispara el mismo flujo de
+    borrado que el botón del menú, con confirmación."""
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user:
+        await update.message.reply_text(WELCOME_NUEVO)
+        return
+    await update.message.reply_text(
+        "🗑️ *Borrar mis datos*\n\nEsto elimina *todas* sus tareas, gastos, ingresos, "
+        "deudas, listas y recordatorios, y desconecta su Google. Su suscripción NO se toca.\n\n"
+        "⚠️ *No se puede deshacer.* ¿Confirma?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ Sí, borrar todo", callback_data="menu_delete_yes")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="menu_delete_cancel")],
+        ]),
+    )
+
+
 async def _post_init(application: Application) -> None:
     from scheduler import setup_scheduler
 
@@ -3163,6 +3187,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("reconectar", reconectar_command))
+    app.add_handler(CommandHandler("borrar_cuenta", borrar_cuenta_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE | filters.PHOTO, handle_message))
