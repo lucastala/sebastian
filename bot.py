@@ -27,7 +27,6 @@ from database import (
     get_active_users,
     get_user,
     get_user_reminders,
-    update_user_genero,
     use_activation_code,
 )
 from texts import INSTRUCCIONES_TEXTO, MANUAL_TAREAS
@@ -2009,29 +2008,33 @@ def _tasks_help_kb() -> InlineKeyboardMarkup:
     ]])
 
 
-def _genero_label(user: dict) -> str:
-    g = (user.get("genero") or "").lower()
-    return {"f": "Femenino (señora)", "m": "Masculino (señor)"}.get(g, "Sin definir")
-
-
 def _format_config(user: dict) -> str:
-    return f"⚙️ *Configuración*\n\n👤 Trato: *{_genero_label(user)}*"
+    estado = (user.get("estado_suscripcion") or "—").lower()
+    estado_label = {"activo": "Activa ✅", "trial": "Prueba 🎁", "inactivo": "Inactiva ⛔"}.get(
+        estado, estado
+    )
+    venc_line = ""
+    venc = user.get("fecha_vencimiento")
+    if venc:
+        try:
+            d = datetime.fromisoformat(str(venc).replace("Z", "+00:00"))
+            dias = (d - datetime.now(timezone.utc)).days
+            detalle = f" (en {dias} días)" if dias >= 0 else " (vencida)"
+            venc_line = f"\n📅 Vence: *{d.strftime('%d/%m/%Y')}*{detalle}"
+        except Exception:
+            pass
+    google = "Conectada ✅" if user.get("access_token") else "No conectada ❌"
+    return (
+        "⚙️ *Configuración*\n\n"
+        f"🔑 Suscripción: *{estado_label}*{venc_line}\n"
+        f"🔗 Cuenta de Google: *{google}*"
+    )
 
 
 def _build_config_menu(user: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"👤 Sexo: {_genero_label(user)}", callback_data="menu_sexo")],
+        [InlineKeyboardButton("🔗 Reconectar Google", callback_data="menu_reconnect")],
         [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
-    ])
-
-
-def _build_sexo_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("♀️ Femenino", callback_data="menu_setsex_f"),
-            InlineKeyboardButton("♂️ Masculino", callback_data="menu_setsex_m"),
-        ],
-        [InlineKeyboardButton("⬅️ Volver", callback_data="menu_config")],
     ])
 
 
@@ -2409,27 +2412,12 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if data == "menu_sexo":
+    if data == "menu_reconnect":
+        oauth_url = await _make_oauth_url(chat_id)
         await query.edit_message_text(
-            "👤 ¿Cómo prefiere que me dirija a usted?",
-            reply_markup=_build_sexo_menu(),
-        )
-        return
-
-    if data in ("menu_setsex_f", "menu_setsex_m"):
-        genero = "f" if data.endswith("_f") else "m"
-        ok = await update_user_genero(chat_id, genero)
-        if not ok:
-            await query.message.reply_text(
-                "⚠️ No pude guardar la preferencia. Falta crear la columna en la base:\n"
-                "`ALTER TABLE public.usuarios ADD COLUMN IF NOT EXISTS genero TEXT;`",
-                parse_mode="Markdown",
-            )
-            return
-        user = await get_user(chat_id)
-        await query.edit_message_text(
-            _format_config(user), parse_mode="Markdown",
-            reply_markup=_build_config_menu(user),
+            "🔗 Para reconectar su cuenta de Google, abra este enlace "
+            f"(sus datos no se borran):\n{oauth_url}",
+            reply_markup=_menu_back("menu_config"),
         )
         return
 
