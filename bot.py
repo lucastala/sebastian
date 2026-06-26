@@ -585,8 +585,25 @@ OPENAI_TOOLS = [
                     "hora": {
                         "type": "string",
                         "description": (
-                            "Hora en formato HH:MM (opcional). "
-                            "Si no se provee se crea como evento de todo el día."
+                            "Hora de inicio en formato HH:MM 24h (opcional). Copiá los minutos "
+                            "exactos que diga el usuario, sin redondear. Si solo da una franja del "
+                            "día, traducila (mañana=09:00, mediodía=13:00, tarde=16:00, noche=20:00). "
+                            "Si no hay ninguna referencia horaria, omitila: será evento de todo el día."
+                        ),
+                    },
+                    "hora_fin": {
+                        "type": "string",
+                        "description": (
+                            "Hora de fin en formato HH:MM 24h (opcional). Usala cuando el usuario "
+                            "da un rango, ej. 'de 19 a 20' → hora=19:00, hora_fin=20:00."
+                        ),
+                    },
+                    "duracion_min": {
+                        "type": "integer",
+                        "description": (
+                            "Duración en minutos (opcional). Usala cuando el usuario da una "
+                            "duración, ej. 'reunión de 2 horas' → 120, 'media hora' → 30. "
+                            "Si no se da ni hora_fin ni duracion_min, dura 1 hora."
                         ),
                     },
                 },
@@ -1171,6 +1188,27 @@ def _format_fecha(fecha_str: str) -> str:
         return fecha_str
 
 
+def _format_event_confirmation(ev: dict) -> str:
+    """Confirmación determinística de un evento creado, armada con los datos REALES que
+    devolvió Google (hora exacta + link). No la escribe el modelo: así nunca redondea
+    ni dice que agendó algo que no se creó."""
+    nombre = ev.get("nombre") or "Evento"
+    link = ev.get("link")
+    if ev.get("all_day"):
+        fecha = (ev.get("inicio") or "")[:10]
+        cuando = f"{_format_fecha(fecha)} · todo el día"
+    else:
+        inicio = ev.get("inicio", "")
+        fin = ev.get("fin", "")
+        h1, h2 = inicio[11:16], fin[11:16]
+        base = _format_fecha(inicio[:10])
+        cuando = f"{base} · {h1} a {h2}" if h2 else f"{base} · {h1}"
+    txt = f"✅ *Agendado: {nombre}*\n📅 {cuando}"
+    if link:
+        txt += f"\n🔗 [Ver en Google Calendar]({link})"
+    return txt
+
+
 def _sort_tasks(tasks: list[dict]) -> list[dict]:
     """No-date tasks first, then dated tasks most-distant→most-recent (top→bottom)."""
     no_date = [t for t in tasks if not str(t.get("fecha", "")).strip()]
@@ -1264,7 +1302,8 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         return await search_event(user, func_args["query"])
     if func_name == "create_event":
         return await create_event(
-            user, func_args["nombre"], func_args["fecha"], func_args.get("hora")
+            user, func_args["nombre"], func_args["fecha"], func_args.get("hora"),
+            func_args.get("hora_fin"), func_args.get("duracion_min"),
         )
     if func_name == "get_pending_tasks":
         tasks = await get_pending_tasks(user)
@@ -1450,9 +1489,12 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
 
 async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
     """Execute one assistant message's tool calls and append their results to
-    `messages`. Returns (pending_keyboard, show_tasks)."""
+    `messages`. Returns (pending_keyboard, show_tasks, direct_reply).
+    direct_reply, si no es None, es un texto final armado por el código (ej. la
+    confirmación de un evento) que debe usarse tal cual, sin que el modelo lo reformule."""
     pending_keyboard: InlineKeyboardMarkup | None = None
     show_tasks = False
+    direct_reply: str | None = None
 
     for tc in msg.tool_calls:
         func_name = tc.function.name
@@ -1544,7 +1586,11 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                 if target_dt else []
             )
             if conflicts:
-                _pending_event_creates[chat_id] = {"nombre": nombre, "fecha": fecha, "hora": hora}
+                _pending_event_creates[chat_id] = {
+                    "nombre": nombre, "fecha": fecha, "hora": hora,
+                    "hora_fin": func_args.get("hora_fin"),
+                    "duracion_min": func_args.get("duracion_min"),
+                }
                 conflict_names = ", ".join(f'"{ev["nombre"]}"' for ev in conflicts[:3])
                 pending_keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Sí, agendar igual", callback_data="createConflict_yes"),
@@ -1556,10 +1602,20 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                 })
             else:
                 result = await _execute_tool(func_name, func_args, user)
+                # La confirmación la arma el código desde el evento real (no el modelo).
+                direct_reply = _format_event_confirmation(result)
                 messages.append({
                     "tool_call_id": tc.id, "role": "tool", "name": func_name,
                     "content": json.dumps(result, ensure_ascii=False, default=str),
                 })
+        elif func_name == "create_event":
+            # Evento de todo el día (sin hora): también confirmación determinística.
+            result = await _execute_tool(func_name, func_args, user)
+            direct_reply = _format_event_confirmation(result)
+            messages.append({
+                "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
         else:
             result = await _execute_tool(func_name, func_args, user)
             messages.append({
@@ -1569,7 +1625,7 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
 
-    return pending_keyboard, show_tasks
+    return pending_keyboard, show_tasks, direct_reply
 
 
 async def _call_openai(
@@ -1607,8 +1663,18 @@ async def _call_openai(
             f"La fecha de hoy es {today} ({dia_semana}). "
             "Si el usuario menciona días relativos (mañana, el lunes, el próximo sábado, etc.), "
             "calculá la fecha exacta a partir de hoy usando el día de la semana indicado. "
-            "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), "
-            "usá siempre HH:00 como minutos. "
+            "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), usá HH:00. "
+            "Si da minutos exactos ('19:30', 'siete y media'), respetalos TAL CUAL: NUNCA redondees. "
+            "\n\nREGLA PARA CREAR EVENTOS (create_event): "
+            "Pasá la hora de inicio en 'hora' (HH:MM, 24h) copiando exactamente lo que dijo el "
+            "usuario. Si da un rango ('de 19 a 20', 'de 9 a 10:30'), pasá también 'hora_fin'. "
+            "Si da una duración ('reunión de 2 horas', 'media hora'), pasá 'duracion_min' en minutos. "
+            "Si no da hora exacta pero sí una franja del día, traducila: mañana=09:00, mediodía=13:00, "
+            "tarde=16:00, tardecita/al caer la tarde=18:00, noche=20:00, bien de noche=22:00 "
+            "(interpolá los casos intermedios, ej. 'tarde-noche'≈19:00). "
+            "Si NO hay NINGUNA referencia horaria (ni hora ni franja), NO pases 'hora': se agenda "
+            "como evento de todo el día. "
+            "No escribas vos la confirmación del evento: el sistema la arma con la hora real y el link."
             "\n\nREGLA OBLIGATORIA PARA ELIMINAR EVENTOS: "
             "Cuando el usuario quiera eliminar un evento, llamá INMEDIATAMENTE delete_event "
             "con el nombre del evento y la fecha. NO busques el evento antes, NO pidas confirmación con texto. "
@@ -1755,6 +1821,7 @@ async def _call_openai(
 
     pending_keyboard: InlineKeyboardMarkup | None = None
     show_tasks = False  # only append the tasks list when the list actually changed
+    direct_reply: str | None = None
     rounds = 0
 
     # Multi-round tool loop: keep the tools available so the model can chain
@@ -1763,10 +1830,17 @@ async def _call_openai(
     while msg.tool_calls and rounds < MAX_TOOL_ROUNDS:
         rounds += 1
         messages.append(msg)
-        pk, st = await _run_tool_calls(msg, messages, user, chat_id)
+        pk, st, dr = await _run_tool_calls(msg, messages, user, chat_id)
         if pk is not None:
             pending_keyboard = pk
         show_tasks = show_tasks or st
+        if dr is not None:
+            direct_reply = dr
+        # Si una tool armó la respuesta final (ej. confirmación de evento), la usamos
+        # tal cual y cortamos: el modelo no la reformula (no redondea ni inventa).
+        if direct_reply is not None:
+            _add_to_history(chat_id, text, direct_reply)
+            return direct_reply, pending_keyboard, show_tasks
         response = await openai_client.chat.completions.create(
             model=CHAT_MODEL,
             messages=messages,
@@ -2575,9 +2649,13 @@ async def handle_create_conflict(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     try:
-        await create_event(user, pending["nombre"], pending["fecha"], pending["hora"])
+        result = await create_event(
+            user, pending["nombre"], pending["fecha"], pending["hora"],
+            pending.get("hora_fin"), pending.get("duracion_min"),
+        )
         await query.edit_message_text(
-            f"✅ Evento creado: *{pending['nombre']}*", parse_mode="Markdown"
+            _format_event_confirmation(result), parse_mode="Markdown",
+            disable_web_page_preview=True,
         )
     except Exception as e:
         logger.error(f"Error creating event after conflict confirm: {e}")
@@ -2710,16 +2788,16 @@ async def _photo_evento(message, user: dict, data: dict) -> None:
         await message.reply_text("📷 Vi un evento pero no pude leer la fecha. ¿Me la dice?")
         return
     try:
-        await create_event(user, nombre, fecha, hora)
+        result = await create_event(user, nombre, fecha, hora)
     except Exception as e:
         logger.error(f"Photo event create error for {user['chat_id']}: {e}")
         await message.reply_text("⚠️ No pude crear el evento desde la foto.")
         return
-    cuando = _format_fecha(fecha) + (f" a las {hora}" if hora else "")
+    confirm = _format_event_confirmation(result)
     try:
-        await message.reply_text(f"✅ Evento creado desde la foto: *{nombre}* — {cuando}", parse_mode="Markdown")
+        await message.reply_text(confirm, parse_mode="Markdown", disable_web_page_preview=True)
     except Exception:
-        await message.reply_text(f"✅ Evento creado: {nombre} — {cuando}")
+        await message.reply_text(confirm)
 
 
 async def _handle_photo(update: Update, user: dict) -> None:

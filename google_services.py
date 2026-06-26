@@ -215,7 +215,12 @@ async def delete_event(user: dict, event_id: str) -> bool:
 
 
 async def create_event(
-    user: dict, nombre: str, fecha: str, hora: Optional[str] = None
+    user: dict,
+    nombre: str,
+    fecha: str,
+    hora: Optional[str] = None,
+    hora_fin: Optional[str] = None,
+    duracion_min: Optional[int] = None,
 ) -> dict:
     creds = await refresh_user_credentials(user)
     loop = asyncio.get_running_loop()
@@ -225,17 +230,25 @@ async def create_event(
 
         if hora:
             start_dt = datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M")
-            end_dt = start_dt + timedelta(hours=1)
+            # Fin: hora_fin explícita (si es válida y posterior), o duración, o 1 hora.
+            end_dt = None
+            if hora_fin:
+                try:
+                    cand = datetime.strptime(f"{fecha} {hora_fin}", "%Y-%m-%d %H:%M")
+                    if cand > start_dt:
+                        end_dt = cand
+                except ValueError:
+                    end_dt = None
+            if end_dt is None and duracion_min:
+                end_dt = start_dt + timedelta(minutes=int(duracion_min))
+            if end_dt is None:
+                end_dt = start_dt + timedelta(hours=1)
+
+            tz = "America/Argentina/Buenos_Aires"
             body = {
                 "summary": nombre,
-                "start": {
-                    "dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:00"),
-                    "timeZone": "America/Argentina/Buenos_Aires",
-                },
-                "end": {
-                    "dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:00"),
-                    "timeZone": "America/Argentina/Buenos_Aires",
-                },
+                "start": {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": tz},
+                "end": {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": tz},
             }
         else:
             body = {
@@ -245,10 +258,15 @@ async def create_event(
             }
 
         event = service.events().insert(calendarId="primary", body=body).execute()
+        start_val = event["start"].get("dateTime", event["start"].get("date", ""))
+        end_val = event["end"].get("dateTime", event["end"].get("date", ""))
         return {
             "id": event.get("id"),
             "nombre": event.get("summary"),
             "link": event.get("htmlLink"),
+            "inicio": start_val,
+            "fin": end_val,
+            "all_day": "dateTime" not in event.get("start", {}),
         }
 
     return await loop.run_in_executor(None, _create)
