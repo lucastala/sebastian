@@ -1495,6 +1495,7 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
     pending_keyboard: InlineKeyboardMarkup | None = None
     show_tasks = False
     direct_reply: str | None = None
+    event_confirmations: list[str] = []  # una por cada evento creado en esta tanda
 
     for tc in msg.tool_calls:
         func_name = tc.function.name
@@ -1603,7 +1604,7 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
             else:
                 result = await _execute_tool(func_name, func_args, user)
                 # La confirmación la arma el código desde el evento real (no el modelo).
-                direct_reply = _format_event_confirmation(result)
+                event_confirmations.append(_format_event_confirmation(result))
                 messages.append({
                     "tool_call_id": tc.id, "role": "tool", "name": func_name,
                     "content": json.dumps(result, ensure_ascii=False, default=str),
@@ -1611,7 +1612,7 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
         elif func_name == "create_event":
             # Evento de todo el día (sin hora): también confirmación determinística.
             result = await _execute_tool(func_name, func_args, user)
-            direct_reply = _format_event_confirmation(result)
+            event_confirmations.append(_format_event_confirmation(result))
             messages.append({
                 "tool_call_id": tc.id, "role": "tool", "name": func_name,
                 "content": json.dumps(result, ensure_ascii=False, default=str),
@@ -1624,6 +1625,9 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                 "name": func_name,
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
+
+    if event_confirmations:
+        direct_reply = "\n\n".join(event_confirmations)
 
     return pending_keyboard, show_tasks, direct_reply
 
@@ -1779,7 +1783,10 @@ async def _call_openai(
     elif _is_task_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_task"}}
     elif _is_event_create_intent(text):
-        tool_choice = {"type": "function", "function": {"name": "create_event"}}
+        # "required" (no una función fija) obliga a la IA a actuar pero le permite
+        # emitir VARIAS create_event en un mismo mensaje (una por evento), así soporta
+        # múltiples eventos sin hardcodear el conteo ni parsear nosotros.
+        tool_choice = "required"
     elif _is_fixed_query_intent(text):
         tool_choice = {"type": "function", "function": {"name": "get_fixed_expenses"}}
     elif _is_fixed_cancel_intent(text):
