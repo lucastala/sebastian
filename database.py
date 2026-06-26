@@ -86,6 +86,29 @@ async def update_user_resumen(chat_id: int, hora: int | None) -> bool:
         return False
 
 
+def _today_ar() -> str:
+    return datetime.now(timezone(timedelta(hours=-3))).date().isoformat()
+
+
+async def register_message(user: dict, limit: int) -> bool:
+    """Cuenta el mensaje del día del usuario. Devuelve True si está dentro del límite,
+    False si lo superó. Ante error de base, deja pasar (no bloquea a usuarios legítimos)."""
+    chat_id = user["chat_id"]
+    today = _today_ar()
+    count = user.get("msgs_hoy") or 0
+    if str(user.get("msgs_fecha")) != today:
+        count = 0
+    if count >= limit:
+        return False
+    try:
+        get_supabase().table("usuarios").update(
+            {"msgs_hoy": count + 1, "msgs_fecha": today}
+        ).eq("chat_id", chat_id).execute()
+    except Exception as e:
+        logger.error(f"Error registering message for {chat_id}: {e}")
+    return True
+
+
 async def wipe_user_account_extras(chat_id: int) -> None:
     """Para 'borrar mis datos': elimina recordatorios y desconecta Google (limpia tokens).
     NO borra la fila de usuarios ni toca la suscripción."""

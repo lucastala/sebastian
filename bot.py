@@ -28,6 +28,7 @@ from database import (
     get_active_users,
     get_user,
     get_user_reminders,
+    register_message,
     update_user_resumen,
     update_user_tratamiento,
     use_activation_code,
@@ -89,6 +90,11 @@ CHAT_MODEL = "gpt-4.1-mini"
 
 # Max chained tool rounds per message (search→update, etc.) before forcing a reply
 MAX_TOOL_ROUNDS = 5
+
+# Límite de mensajes por usuario por día (anti-abuso / rate limits). Tunéable por env.
+DAILY_MSG_LIMIT = int(os.getenv("DAILY_MSG_LIMIT", "100"))
+# Tope de duración de audios (segundos) para no transcribir audios eternos.
+MAX_VOICE_SECONDS = int(os.getenv("MAX_VOICE_SECONDS", "300"))
 
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "https://tu-link-de-pago.com")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
@@ -3040,6 +3046,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    # Límite de mensajes por usuario/día (protege costo y rate limits de OpenAI).
+    if not await register_message(user, DAILY_MSG_LIMIT):
+        await message.reply_text(
+            f"⚠️ Llegó al límite de {DAILY_MSG_LIMIT} mensajes por hoy. "
+            "Se reinicia mañana. ¡Gracias por usar Sebastian!"
+        )
+        return
+
     await message.reply_chat_action("typing")
 
     # Foto → la IA decide qué es (gasto, tarea, evento o texto) y actúa
@@ -3048,6 +3062,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if message.voice:
+        if (message.voice.duration or 0) > MAX_VOICE_SECONDS:
+            await message.reply_text(
+                f"⚠️ El audio es muy largo (máx. {MAX_VOICE_SECONDS // 60} minutos). "
+                "¿Me lo manda más corto o por texto?"
+            )
+            return
         try:
             voice_file = await message.voice.get_file()
             raw = await voice_file.download_as_bytearray()
