@@ -1640,20 +1640,8 @@ async def _call_openai(
     dia_semana = DIAS_ES[now.weekday()]
     chat_id = user["chat_id"]
 
-    genero = (user.get("genero") or "").lower()
-    if genero == "f":
-        trato = (
-            "Dirigite a la usuaria llamándola 'señora' de forma muy frecuente "
-            "(al saludar, al confirmar y al despedirte). Nunca le digas 'señor'."
-        )
-    elif genero == "m":
-        trato = (
-            "Dirigite al usuario llamándolo 'señor' de forma muy frecuente "
-            "(al saludar, al confirmar y al despedirte). Nunca le digas 'señora'."
-        )
-    else:
-        trato = "Dirigite al usuario de usted, de forma sumamente respetuosa."
-
+    # NOTA: este system_msg es 100% ESTÁTICO (igual para todos, siempre). Eso permite que
+    # OpenAI lo cachee y cobre ese bloque más barato. Lo dinámico (la fecha) va aparte, abajo.
     system_msg = {
         "role": "system",
         "content": (
@@ -1662,11 +1650,9 @@ async def _call_openai(
             "Hablás SIEMPRE de USTED (nunca de vos ni de tú), con un tono exageradamente "
             "cortés, servicial y elegante, usando fórmulas de cortesía como 'con gusto', "
             "'a su entera disposición', 'si me permite', 'será un placer'. "
-            f"{trato} "
-            "El usuario puede escribirte de vos, pero vos respondé siempre con este trato formal. "
-            f"La fecha de hoy es {today} ({dia_semana}). "
-            "Si el usuario menciona días relativos (mañana, el lunes, el próximo sábado, etc.), "
-            "calculá la fecha exacta a partir de hoy usando el día de la semana indicado. "
+            "NO uses 'señor' ni 'señora' ni ningún término con género para dirigirte a la "
+            "persona: mantené un trato formal y neutro (de usted), apoyándote en las fórmulas "
+            "de cortesía. El usuario puede escribirte de vos, pero respondé siempre con este trato formal. "
             "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), usá HH:00. "
             "Si da minutos exactos ('19:30', 'siete y media'), respetalos TAL CUAL: NUNCA redondees. "
             "\n\nREGLA PARA CREAR EVENTOS (create_event): "
@@ -1749,8 +1735,18 @@ async def _call_openai(
         ),
     }
 
-    # Build messages: system + history + current
-    messages = [system_msg] + _get_history(chat_id) + [{"role": "user", "content": text}]
+    # La fecha va en un mensaje aparte (dinámico) para no romper la caché del system_msg.
+    # Es la misma para todos en el día, así que igual se cachea entre usuarios.
+    fecha_msg = {
+        "role": "system",
+        "content": (
+            f"Fecha de hoy: {today} ({dia_semana}). Si el usuario menciona días relativos "
+            "(mañana, el lunes, el próximo sábado, etc.), calculá la fecha exacta a partir de hoy."
+        ),
+    }
+
+    # Build messages: system estático + fecha + history + current
+    messages = [system_msg, fecha_msg] + _get_history(chat_id) + [{"role": "user", "content": text}]
 
     # Force specific tools when intent is clear — gpt-4o-mini hallucinates otherwise.
     # Order matters: most specific first (fixed/expense edits before generic delete/edit).
