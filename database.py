@@ -86,6 +86,18 @@ async def update_user_resumen(chat_id: int, hora: int | None) -> bool:
         return False
 
 
+async def update_user_tratamiento(chat_id: int, tratamiento: str | None) -> bool:
+    """Cómo quiere la persona que la llamen (nombre/título), o None para trato neutro."""
+    try:
+        get_supabase().table("usuarios").update({"tratamiento": tratamiento}).eq(
+            "chat_id", chat_id
+        ).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating tratamiento for {chat_id}: {e}")
+        return False
+
+
 async def check_subscription(chat_id: int) -> bool:
     user = await get_user(chat_id)
     if not user:

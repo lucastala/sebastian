@@ -28,6 +28,7 @@ from database import (
     get_user,
     get_user_reminders,
     update_user_resumen,
+    update_user_tratamiento,
     use_activation_code,
 )
 from texts import INSTRUCCIONES_TEXTO, MANUAL_TAREAS
@@ -134,6 +135,9 @@ _super_add_mode: set[int] = set()
 
 # Chats in "add to named list" mode → maps chat_id to the list name being filled
 _list_add_mode: dict[int, str] = {}
+
+# Chats esperando que escriban cómo quieren que Sebastian los llame
+_tratamiento_mode: set[int] = set()
 
 # Chats that just tapped "Nuevo listado" and we're waiting for them to type the name
 _awaiting_list_name: set[int] = set()
@@ -1735,17 +1739,21 @@ async def _call_openai(
         ),
     }
 
-    # La fecha va en un mensaje aparte (dinámico) para no romper la caché del system_msg.
-    # Es la misma para todos en el día, así que igual se cachea entre usuarios.
-    fecha_msg = {
-        "role": "system",
-        "content": (
-            f"Fecha de hoy: {today} ({dia_semana}). Si el usuario menciona días relativos "
-            "(mañana, el lunes, el próximo sábado, etc.), calculá la fecha exacta a partir de hoy."
-        ),
-    }
+    # La fecha (y el trato personalizado) van en un mensaje aparte (dinámico) para no romper
+    # la caché del system_msg estático. La fecha es igual para todos en el día.
+    contexto = (
+        f"Fecha de hoy: {today} ({dia_semana}). Si el usuario menciona días relativos "
+        "(mañana, el lunes, el próximo sábado, etc.), calculá la fecha exacta a partir de hoy."
+    )
+    tratamiento = (user.get("tratamiento") or "").strip()
+    if tratamiento:
+        contexto += (
+            f" La persona pidió que la llames '{tratamiento}': usá ese nombre/título al "
+            "saludar y al confirmar, con naturalidad y sin exagerar."
+        )
+    fecha_msg = {"role": "system", "content": contexto}
 
-    # Build messages: system estático + fecha + history + current
+    # Build messages: system estático + contexto + history + current
     messages = [system_msg, fecha_msg] + _get_history(chat_id) + [{"role": "user", "content": text}]
 
     # Force specific tools when intent is clear — gpt-4o-mini hallucinates otherwise.
@@ -2014,6 +2022,11 @@ def _resumen_label(user: dict) -> str:
     return f"{hr:02d}:00" if isinstance(hr, int) else "Apagado"
 
 
+def _tratamiento_label(user: dict) -> str:
+    t = (user.get("tratamiento") or "").strip()
+    return t if t else "Neutro"
+
+
 def _format_config(user: dict) -> str:
     estado = (user.get("estado_suscripcion") or "—").lower()
     estado_label = {"activo": "Activa ✅", "trial": "Prueba 🎁", "inactivo": "Inactiva ⛔"}.get(
@@ -2032,6 +2045,7 @@ def _format_config(user: dict) -> str:
     google = "Conectada ✅" if user.get("access_token") else "No conectada ❌"
     return (
         "⚙️ *Configuración*\n\n"
+        f"👤 Te llamo: *{_tratamiento_label(user)}*\n"
         f"🌅 Resumen diario: *{_resumen_label(user)}*\n"
         f"🔑 Suscripción: *{estado_label}*{venc_line}\n"
         f"🔗 Cuenta de Google: *{google}*"
@@ -2040,6 +2054,7 @@ def _format_config(user: dict) -> str:
 
 def _build_config_menu(user: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"👤 Cómo te llamo: {_tratamiento_label(user)}", callback_data="menu_tratamiento")],
         [InlineKeyboardButton(f"🌅 Resumen diario: {_resumen_label(user)}", callback_data="menu_resumen")],
         [InlineKeyboardButton("🔗 Reconectar Google", callback_data="menu_reconnect")],
         [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
@@ -2431,6 +2446,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if data == "menu_config":
+        _tratamiento_mode.discard(chat_id)  # por si venía del modo "nombre"
         await query.edit_message_text(
             _format_config(user), parse_mode="Markdown",
             reply_markup=_build_config_menu(user),
@@ -2443,6 +2459,30 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "🔗 Para reconectar su cuenta de Google, abra este enlace "
             f"(sus datos no se borran):\n{oauth_url}",
             reply_markup=_menu_back("menu_config"),
+        )
+        return
+
+    if data == "menu_tratamiento":
+        _tratamiento_mode.add(chat_id)
+        await query.edit_message_text(
+            "👤 *¿Cómo quiere que lo/la llame?*\n\n"
+            "Escríbame el nombre o título que prefiera (ej. su nombre, «jefe», «doctora»). "
+            "Lo usaré al saludarlo y confirmarle cosas.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚫 Sin nombre (neutro)", callback_data="menu_trato_none")],
+                [InlineKeyboardButton("⬅️ Volver", callback_data="menu_config")],
+            ]),
+        )
+        return
+
+    if data == "menu_trato_none":
+        _tratamiento_mode.discard(chat_id)
+        await update_user_tratamiento(chat_id, None)
+        user = await get_user(chat_id)
+        await query.edit_message_text(
+            _format_config(user), parse_mode="Markdown",
+            reply_markup=_build_config_menu(user),
         )
         return
 
@@ -2505,6 +2545,23 @@ async def _route_text(
                 InlineKeyboardButton("✅ Terminar", callback_data="menu_listdone")
             ]]),
         )
+        return
+
+    # "¿Cómo querés que te llame?" mode — el próximo mensaje es el nombre/título
+    if chat_id in _tratamiento_mode:
+        _tratamiento_mode.discard(chat_id)
+        t = text.strip()
+        low = t.lower()
+        if low in ("cancelar", ".", "salir"):
+            await message.reply_text("Listo, no cambié nada.")
+            return
+        if low in ("neutro", "ninguno", "ninguna", "nada", "quitar", "sacar", "sin nombre"):
+            await update_user_tratamiento(chat_id, None)
+            await message.reply_text("Listo, no usaré ningún nombre. Trato neutro.")
+            return
+        nombre_trato = t[:40]
+        await update_user_tratamiento(chat_id, nombre_trato)
+        await message.reply_text(f"Perfecto, de ahora en más lo llamaré «{nombre_trato}».")
         return
 
     # Named-list "add mode" — everything sent goes into that list until "listo"
