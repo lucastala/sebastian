@@ -438,3 +438,38 @@ async def delete_list(user: dict, nombre: str) -> int:
     for r in rows:
         get_supabase().table("listados").delete().eq("id", r["id"]).execute()
     return len(rows)
+
+
+# ── Exportar / borrar todos los datos del usuario ─────────────────────────────
+
+# Tablas de datos del usuario (no incluye 'usuarios' ni 'recordatorios').
+_USER_DATA_TABLES = (
+    "tareas", "gastos", "ingresos", "gastos_fijos", "deudas", "supermercado", "listados",
+)
+
+
+async def export_user_data(user: dict) -> dict[str, list[dict]]:
+    """Devuelve {tabla: filas} con los datos crudos del usuario, para exportar a CSV."""
+    chat_id = user["chat_id"]
+    out: dict[str, list[dict]] = {}
+    for tabla in _USER_DATA_TABLES:
+        try:
+            res = get_supabase().table(tabla).select("*").eq("chat_id", chat_id).execute()
+            out[tabla] = res.data or []
+        except Exception as e:
+            logger.error(f"Error exporting {tabla} for {chat_id}: {e}")
+            out[tabla] = []
+    return out
+
+
+async def delete_all_user_data(user: dict) -> int:
+    """Borra TODAS las filas del usuario en las tablas de datos. Devuelve cuántas tablas tocó."""
+    chat_id = user["chat_id"]
+    tocadas = 0
+    for tabla in _USER_DATA_TABLES:
+        try:
+            get_supabase().table(tabla).delete().eq("chat_id", chat_id).execute()
+            tocadas += 1
+        except Exception as e:
+            logger.error(f"Error deleting {tabla} for {chat_id}: {e}")
+    return tocadas

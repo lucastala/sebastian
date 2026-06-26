@@ -86,6 +86,23 @@ async def update_user_resumen(chat_id: int, hora: int | None) -> bool:
         return False
 
 
+async def wipe_user_account_extras(chat_id: int) -> None:
+    """Para 'borrar mis datos': elimina recordatorios y desconecta Google (limpia tokens).
+    NO borra la fila de usuarios ni toca la suscripción."""
+    sb = get_supabase()
+    try:
+        sb.table("recordatorios").delete().eq("chat_id", chat_id).execute()
+    except Exception as e:
+        logger.error(f"Error deleting recordatorios for {chat_id}: {e}")
+    try:
+        sb.table("usuarios").update({
+            "access_token": None, "refresh_token": None,
+            "token_expiry": None, "email": None,
+        }).eq("chat_id", chat_id).execute()
+    except Exception as e:
+        logger.error(f"Error clearing Google tokens for {chat_id}: {e}")
+
+
 async def update_user_tratamiento(chat_id: int, tratamiento: str | None) -> bool:
     """Cómo quiere la persona que la llamen (nombre/título), o None para trato neutro."""
     try:

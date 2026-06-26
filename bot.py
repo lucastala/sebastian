@@ -1,5 +1,6 @@
 import base64
 import calendar as cal_module
+import csv
 import io
 import json
 import logging
@@ -9,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -30,6 +31,7 @@ from database import (
     update_user_resumen,
     update_user_tratamiento,
     use_activation_code,
+    wipe_user_account_extras,
 )
 from texts import INSTRUCCIONES_TEXTO, MANUAL_TAREAS
 from google_services import (
@@ -51,8 +53,10 @@ from data_store import (
     add_task,
     cancel_fixed_expense,
     clear_super_list,
+    delete_all_user_data,
     delete_expense,
     delete_list,
+    export_user_data,
     delete_task_by_position,
     get_balance,
     get_debts,
@@ -2027,6 +2031,17 @@ def _tratamiento_label(user: dict) -> str:
     return t if t else "Neutro"
 
 
+def _rows_to_csv(rows: list[dict]) -> bytes:
+    """Convierte filas (dicts) a CSV. Saca columnas internas (id/chat_id). BOM para Excel."""
+    cols = [k for k in rows[0].keys() if k not in ("id", "chat_id")]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        w.writerow({c: r.get(c, "") for c in cols})
+    return buf.getvalue().encode("utf-8-sig")
+
+
 def _format_config(user: dict) -> str:
     estado = (user.get("estado_suscripcion") or "—").lower()
     estado_label = {"activo": "Activa ✅", "trial": "Prueba 🎁", "inactivo": "Inactiva ⛔"}.get(
@@ -2057,6 +2072,8 @@ def _build_config_menu(user: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"👤 Cómo te llamo: {_tratamiento_label(user)}", callback_data="menu_tratamiento")],
         [InlineKeyboardButton(f"🌅 Resumen diario: {_resumen_label(user)}", callback_data="menu_resumen")],
         [InlineKeyboardButton("🔗 Reconectar Google", callback_data="menu_reconnect")],
+        [InlineKeyboardButton("📤 Exportar mis datos", callback_data="menu_export")],
+        [InlineKeyboardButton("🗑️ Borrar mis datos", callback_data="menu_delete")],
         [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
     ])
 
@@ -2502,6 +2519,49 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text(
             _format_config(user), parse_mode="Markdown",
             reply_markup=_build_config_menu(user),
+        )
+        return
+
+    if data == "menu_export":
+        datos = await export_user_data(user)
+        enviados = 0
+        for tabla, rows in datos.items():
+            if not rows:
+                continue
+            try:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=InputFile(io.BytesIO(_rows_to_csv(rows)), filename=f"{tabla}.csv"),
+                    caption=f"📤 {tabla} ({len(rows)})",
+                )
+                enviados += 1
+            except Exception as e:
+                logger.error(f"Error exporting {tabla} for {chat_id}: {e}")
+        await query.message.reply_text(
+            f"✅ Listo, le envié {enviados} archivo(s) CSV."
+            if enviados else "No tiene datos para exportar todavía."
+        )
+        return
+
+    if data == "menu_delete":
+        await query.edit_message_text(
+            "🗑️ *Borrar mis datos*\n\nEsto elimina *todas* sus tareas, gastos, ingresos, "
+            "deudas, listas y recordatorios, y desconecta su Google. "
+            "Su suscripción NO se toca.\n\n⚠️ *No se puede deshacer.* ¿Confirma?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑️ Sí, borrar todo", callback_data="menu_delete_yes")],
+                [InlineKeyboardButton("⬅️ No, volver", callback_data="menu_config")],
+            ]),
+        )
+        return
+
+    if data == "menu_delete_yes":
+        await delete_all_user_data(user)
+        await wipe_user_account_extras(chat_id)
+        await query.edit_message_text(
+            "🗑️ Listo. Borré todos sus datos y desconecté su cuenta de Google.\n\n"
+            "Si quiere volver a usar Sebastian, reconecte su Google desde el menú."
         )
         return
 
