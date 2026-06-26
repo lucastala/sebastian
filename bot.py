@@ -22,6 +22,7 @@ from telegram.ext import (
 from database import (
     activate_user,
     add_reminder,
+    create_oauth_flow,
     delete_reminder,
     get_active_users,
     get_user,
@@ -2529,7 +2530,7 @@ async def _route_text(
     try:
         reply, keyboard, show_tasks = await _call_openai(user, text)
     except GoogleAuthExpiredError:
-        await message.reply_text(_session_expired_text(user["chat_id"]))
+        await message.reply_text(await _session_expired_text(user["chat_id"]))
         return
     except Exception as e:
         logger.error(f"OpenAI error for user {user['chat_id']}: {e}")
@@ -2607,10 +2608,11 @@ async def handle_delete_event(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("⚠️ No se pudo eliminar el evento.")
 
 
-def _session_expired_text(chat_id: int) -> str:
+async def _session_expired_text(chat_id: int) -> str:
+    oauth_url = await _make_oauth_url(chat_id)
     return (
         "⚠️ Su sesión de Google expiró. Reconecte su cuenta (sus datos no se borran):\n\n"
-        f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+        f"{oauth_url}"
     )
 
 
@@ -2753,6 +2755,13 @@ async def _handle_photo(update: Update, user: dict) -> None:
 
 # ── Main handlers ─────────────────────────────────────────────────────────────
 
+async def _make_oauth_url(chat_id: int) -> str:
+    """Genera un token opaco atado al chat_id y arma el link de OAuth con él.
+    El chat_id ya no viaja por la URL (se resuelve server-side)."""
+    token = await create_oauth_flow(chat_id)
+    return f"{BASE_URL}/oauth/start?token={token}"
+
+
 async def _try_activate_code(update: Update, chat_id: int, nombre: str, code: str) -> None:
     code = code.strip().upper()
     ok = await use_activation_code(code, chat_id)
@@ -2760,7 +2769,7 @@ async def _try_activate_code(update: Update, chat_id: int, nombre: str, code: st
         await update.message.reply_text("❌ Código inválido o ya utilizado.")
         return
     await activate_user(chat_id, nombre)
-    oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+    oauth_url = await _make_oauth_url(chat_id)
     await update.message.reply_text(
         "✅ ¡Código activado! Tu suscripción quedó activa por 30 días.\n\n"
         f"Ahora conectá tu cuenta de Google para empezar:\n{oauth_url}"
@@ -2794,7 +2803,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not user.get("access_token"):
-        oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+        oauth_url = await _make_oauth_url(chat_id)
         await message.reply_text(
             f"⚠️ Todavía no conectó su cuenta de Google.\n\n"
             f"Complete la configuración aquí:\n{oauth_url}"
@@ -2838,7 +2847,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode="Markdown",
         )
     elif activo:
-        oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+        oauth_url = await _make_oauth_url(chat_id)
         await update.message.reply_text(
             "✅ Tu suscripción está activa.\n\n"
             f"Conectá tu cuenta de Google para empezar:\n{oauth_url}"
@@ -2866,7 +2875,7 @@ async def reconectar_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not user or user.get("estado_suscripcion") not in ("activo", "trial"):
         await update.message.reply_text(WELCOME_NUEVO)
         return
-    oauth_url = f"{BASE_URL}/oauth/start?chat_id={chat_id}"
+    oauth_url = await _make_oauth_url(chat_id)
     await update.message.reply_text(
         f"🔗 Haga clic aquí para reconectar su cuenta de Google:\n{oauth_url}\n\n"
         "Sus tareas y datos no se borrarán."

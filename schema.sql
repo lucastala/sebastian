@@ -60,3 +60,17 @@ ALTER TABLE public.recordatorios ENABLE ROW LEVEL SECURITY;
 -- RLS prendido y sin políticas (ver nota arriba): el backend usa la SECRET key
 -- y se saltea RLS; la llave pública queda sin acceso.
 ALTER TABLE public.usuarios ENABLE ROW LEVEL SECURITY;
+
+-- ── OAuth flows ─────────────────────────────────────────────────────────────
+-- Estado efímero del flujo OAuth. El bot inserta una fila con un token opaco
+-- atado al chat_id; el servidor la consume y la borra (uso único). Así el
+-- chat_id nunca viaja por la URL del navegador.
+CREATE TABLE IF NOT EXISTS public.oauth_flows (
+    token         TEXT          PRIMARY KEY,
+    chat_id       BIGINT        NOT NULL,
+    code_verifier TEXT,
+    created_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+-- RLS prendido y SIN políticas (el backend usa la SECRET key, que bypassa RLS).
+ALTER TABLE public.oauth_flows ENABLE ROW LEVEL SECURITY;

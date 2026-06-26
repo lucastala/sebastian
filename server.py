@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import secrets
+from datetime import datetime, timezone, timedelta
 
 import httpx
 from dotenv import load_dotenv
@@ -13,7 +14,10 @@ from google_auth_oauthlib.flow import Flow
 
 from database import (
     create_activation_code,
+    delete_oauth_flow,
     extend_subscription_by_email,
+    get_oauth_flow,
+    set_oauth_flow_verifier,
     update_user_tokens,
 )
 from email_service import send_activation_code
@@ -41,6 +45,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/calendar",
 ]
+
+OAUTH_FLOW_TTL = timedelta(minutes=15)
 
 _SUCCESS_HTML = """
 <!DOCTYPE html>
@@ -103,19 +109,36 @@ def _make_code_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
+def _flow_expired(flow_row: dict) -> bool:
+    created = datetime.fromisoformat(flow_row["created_at"])
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created > OAUTH_FLOW_TTL
+
+
 @app.get("/oauth/start")
-async def oauth_start(chat_id: int):
+async def oauth_start(token: str):
+    flow_row = await get_oauth_flow(token)
+    if not flow_row or _flow_expired(flow_row):
+        if flow_row:
+            await delete_oauth_flow(token)
+        return HTMLResponse(
+            _ERROR_HTML.format(
+                message="Link inválido o expirado. Pedí uno nuevo desde Telegram."
+            ),
+            status_code=400,
+        )
+
     code_verifier = _make_code_verifier()
     code_challenge = _make_code_challenge(code_verifier)
+    await set_oauth_flow_verifier(token, code_verifier)
 
     flow = _build_flow()
-    # Encode chat_id + code_verifier in state — survives server restarts
-    state = f"{chat_id}:{code_verifier}"
-
+    # El state es el token opaco; el chat_id vive server-side en oauth_flows.
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        state=state,
+        state=token,
         prompt="consent",
         code_challenge=code_challenge,
         code_challenge_method="S256",
@@ -134,15 +157,20 @@ async def oauth_callback(request: Request):
             status_code=400,
         )
 
-    # Decode chat_id and code_verifier from state
-    try:
-        chat_id_str, code_verifier = state.split(":", 1)
-        chat_id = int(chat_id_str)
-    except (ValueError, AttributeError):
+    # Resolve chat_id + code_verifier from the server-side flow (state = token).
+    flow_row = await get_oauth_flow(state)
+    if not flow_row or not flow_row.get("code_verifier") or _flow_expired(flow_row):
+        logger.warning("OAuth callback con state inválido/expirado/incompleto")
+        if flow_row:
+            await delete_oauth_flow(state)
         return HTMLResponse(
-            _ERROR_HTML.format(message="Estado inválido. Pida el enlace de nuevo."),
+            _ERROR_HTML.format(message="Estado inválido o expirado. Pida el enlace de nuevo."),
             status_code=400,
         )
+
+    chat_id = flow_row["chat_id"]
+    code_verifier = flow_row["code_verifier"]
+    await delete_oauth_flow(state)  # uso único
 
     loop = asyncio.get_running_loop()
     try:

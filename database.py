@@ -108,6 +108,43 @@ async def get_active_users() -> list[dict]:
         return []
 
 
+# ── OAuth flows (binding seguro del chat_id) ──────────────────────────────────
+# El bot emite un token opaco atado al chat_id real (autenticado por Telegram);
+# el servidor resuelve el chat_id desde la base, nunca desde la URL. Uso único.
+
+async def create_oauth_flow(chat_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    get_supabase().table("oauth_flows").insert(
+        {
+            "token": token,
+            "chat_id": chat_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).execute()
+    return token
+
+
+async def get_oauth_flow(token: str) -> dict | None:
+    try:
+        result = (
+            get_supabase().table("oauth_flows").select("*").eq("token", token).execute()
+        )
+        return result.data[0] if result.data else None
+    except Exception as e:
+        logger.error(f"Error getting oauth flow: {e}")
+        return None
+
+
+async def set_oauth_flow_verifier(token: str, code_verifier: str) -> None:
+    get_supabase().table("oauth_flows").update(
+        {"code_verifier": code_verifier}
+    ).eq("token", token).execute()
+
+
+async def delete_oauth_flow(token: str) -> None:
+    get_supabase().table("oauth_flows").delete().eq("token", token).execute()
+
+
 # ── Recordatorios ─────────────────────────────────────────────────────────────
 
 async def add_reminder(chat_id: int, texto: str, fecha_hora_iso: str) -> bool:
