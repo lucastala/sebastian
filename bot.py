@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import calendar as cal_module
 import csv
@@ -9,7 +10,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import (
     Application,
@@ -84,6 +85,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+async def _openai_chat(**kwargs):
+    """chat.completions.create con reintento automático ante 429 (rate limit) o
+    cortes de red transitorios. Espera creciente entre intentos; el usuario no se entera."""
+    last_err = None
+    for intento in range(3):  # 1 intento + 2 reintentos
+        try:
+            return await openai_client.chat.completions.create(**kwargs)
+        except RateLimitError as e:
+            last_err = e
+            await asyncio.sleep(1.5 * (intento + 1))
+        except (APITimeoutError, APIConnectionError) as e:
+            last_err = e
+            await asyncio.sleep(1.0 * (intento + 1))
+    raise last_err
 
 # Chat/vision model — change here to swap models everywhere
 CHAT_MODEL = "gpt-4.1-mini"
@@ -1847,7 +1864,7 @@ async def _call_openai(
         tool_choice = "auto"
     logger.info(f"tool_choice={tool_choice!r} for: {text[:60]!r}")
 
-    response = await openai_client.chat.completions.create(
+    response = await _openai_chat(
         model=CHAT_MODEL,
         messages=messages,
         tools=_tools_for(tool_choice),
@@ -1878,7 +1895,7 @@ async def _call_openai(
         if direct_reply is not None:
             _add_to_history(chat_id, text, direct_reply)
             return direct_reply, pending_keyboard, show_tasks
-        response = await openai_client.chat.completions.create(
+        response = await _openai_chat(
             model=CHAT_MODEL,
             messages=messages,
             tools=OPENAI_TOOLS,
@@ -1904,7 +1921,7 @@ async def _interpret_photo(image_bytes: bytes) -> dict:
     """Look at a photo, classify it (gasto/tarea/evento/texto) and extract the relevant fields."""
     today = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
     b64 = base64.b64encode(image_bytes).decode()
-    resp = await openai_client.chat.completions.create(
+    resp = await _openai_chat(
         model=CHAT_MODEL,
         messages=[
             {
