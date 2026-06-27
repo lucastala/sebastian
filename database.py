@@ -285,6 +285,28 @@ async def _code_exists(codigo: str) -> bool:
         return False
 
 
+async def payment_already_processed(mp_payment_id: str) -> bool:
+    """True si ese pago ya fue procesado por el webhook (anti-replay)."""
+    try:
+        r = get_supabase().table("pagos_procesados").select("mp_payment_id").eq(
+            "mp_payment_id", mp_payment_id
+        ).execute()
+        return bool(r.data)
+    except Exception as e:
+        logger.error(f"Error checking processed payment {mp_payment_id}: {e}")
+        return False  # ante error, dejamos procesar (no bloquear un pago legítimo)
+
+
+async def mark_payment_processed(mp_payment_id: str) -> None:
+    """Marca el pago como procesado para que un reenvío no lo vuelva a procesar."""
+    try:
+        get_supabase().table("pagos_procesados").insert(
+            {"mp_payment_id": mp_payment_id}
+        ).execute()
+    except Exception as e:
+        logger.error(f"Error marking payment {mp_payment_id} processed: {e}")
+
+
 async def create_activation_code(email: str, mp_payment_id: str | None = None) -> str | None:
     """Genera un código único y lo guarda como sin_usar. Devuelve el código."""
     try:

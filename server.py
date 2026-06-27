@@ -17,6 +17,8 @@ from database import (
     delete_oauth_flow,
     extend_subscription_by_email,
     get_oauth_flow,
+    mark_payment_processed,
+    payment_already_processed,
     set_oauth_flow_verifier,
     update_user_tokens,
 )
@@ -284,9 +286,15 @@ async def mercadopago_webhook(request: Request):
         logger.info(f"Pago {payment_id} no aprobado ({status}), no se hace nada")
         return JSONResponse({"ok": True, "status": status})
 
+    # Anti-replay: si ya procesamos este pago, no hacer nada (evita códigos/renovaciones de más).
+    if await payment_already_processed(payment_id):
+        logger.info(f"Pago {payment_id} ya procesado, se ignora (replay).")
+        return JSONResponse({"ok": True, "duplicate": True})
+
     # Pago aprobado. ¿Es recurrente de un usuario ya activo? → extender vencimiento.
     extended_chat = await extend_subscription_by_email(email) if email else None
     if extended_chat:
+        await mark_payment_processed(payment_id)
         logger.info(f"Suscripción extendida 30 días para chat_id={extended_chat} ({email})")
         await _notify_telegram(
             extended_chat, "✅ Recibimos tu pago. Tu suscripción se renovó por 30 días más. ¡Gracias!"
@@ -298,18 +306,12 @@ async def mercadopago_webhook(request: Request):
     if not codigo:
         logger.error(f"No se pudo generar código para el pago {payment_id}")
         return JSONResponse({"ok": False}, status_code=200)
+    await mark_payment_processed(payment_id)
 
-    logger.info(
-        "\n========================================\n"
-        f"  CÓDIGO DE ACTIVACIÓN GENERADO\n"
-        f"  Email: {email}\n"
-        f"  Código: {codigo}\n"
-        f"  Pago MP: {payment_id}\n"
-        "========================================\n"
-    )
-    # Enviar el código por email al comprador (queda logueado igual como respaldo)
+    logger.info(f"Código de activación generado para el pago {payment_id} (email={email})")
+    # Enviar el código por email al comprador. NO lo devolvemos en la respuesta HTTP.
     enviado = await send_activation_code(email, codigo)
-    return JSONResponse({"ok": True, "codigo": codigo, "email_enviado": enviado})
+    return JSONResponse({"ok": True, "email_enviado": enviado})
 
 
 @app.post("/admin/generar-codigo")

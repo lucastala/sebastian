@@ -74,3 +74,13 @@ CREATE TABLE IF NOT EXISTS public.oauth_flows (
 
 -- RLS prendido y SIN políticas (el backend usa la SECRET key, que bypassa RLS).
 ALTER TABLE public.oauth_flows ENABLE ROW LEVEL SECURITY;
+
+-- ── Pagos procesados (anti-replay del webhook de MercadoPago) ─────────────────
+-- Guarda cada payment_id ya procesado para no generar códigos / extender de más
+-- si MercadoPago (o un atacante) reenvía la misma notificación.
+CREATE TABLE IF NOT EXISTS public.pagos_procesados (
+    mp_payment_id TEXT         PRIMARY KEY,
+    procesado_en  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.pagos_procesados ENABLE ROW LEVEL SECURITY;
