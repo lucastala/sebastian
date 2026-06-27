@@ -1646,6 +1646,22 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
     return pending_keyboard, show_tasks, direct_reply
 
 
+def _tools_for(tool_choice) -> list:
+    """Achica la lista de herramientas que mandamos según la intención:
+    - tool puntual forzada → mandamos SOLO esa (ahorra ~el 95% de tokens de tools).
+    - 'required' (crear eventos) → solo create_event (puede llamarla varias veces).
+    - 'auto' → todas (el modelo elige libremente).
+    Si por algo no encuentra la tool, manda todas (no rompe)."""
+    if isinstance(tool_choice, dict):
+        name = tool_choice["function"]["name"]
+        sub = [t for t in OPENAI_TOOLS if t["function"]["name"] == name]
+        return sub or OPENAI_TOOLS
+    if tool_choice == "required":
+        sub = [t for t in OPENAI_TOOLS if t["function"]["name"] == "create_event"]
+        return sub or OPENAI_TOOLS
+    return OPENAI_TOOLS
+
+
 async def _call_openai(
     user: dict, text: str
 ) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -1834,7 +1850,7 @@ async def _call_openai(
     response = await openai_client.chat.completions.create(
         model=CHAT_MODEL,
         messages=messages,
-        tools=OPENAI_TOOLS,
+        tools=_tools_for(tool_choice),
         tool_choice=tool_choice,
     )
 
