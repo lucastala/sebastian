@@ -104,7 +104,10 @@ async def update_task(user: dict, posicion: int, nuevo_nombre: str | None = None
 
 # ── Gastos ────────────────────────────────────────────────────────────────────
 
-def _filter_gastos(rows: list[dict], desde, hasta, categoria) -> list[dict]:
+_CREDITO_ALIASES = ("crédito", "credito", "tarjeta")
+
+
+def _filter_gastos(rows: list[dict], desde, hasta, categoria, medio_pago=None) -> list[dict]:
     out = []
     for r in rows:
         f = str(r.get("fecha") or "").strip()
@@ -114,6 +117,15 @@ def _filter_gastos(rows: list[dict], desde, hasta, categoria) -> list[dict]:
             continue
         if categoria and str(r.get("categoria") or "").strip().lower() != categoria.lower():
             continue
+        if medio_pago:
+            mp = str(r.get("medio_pago") or "").strip().lower()
+            want = medio_pago.lower()
+            # "crédito"/"credito"/"tarjeta" se consideran lo mismo
+            if want in _CREDITO_ALIASES:
+                if mp not in _CREDITO_ALIASES:
+                    continue
+            elif mp != want:
+                continue
         out.append(r)
     out.sort(key=lambda r: r["id"], reverse=True)  # más reciente primero
     return out
@@ -127,18 +139,21 @@ async def _all_gastos(chat_id: int) -> list[dict]:
 async def add_expense(user: dict, monto, categoria: str, descripcion: str = "",
                       fecha: str | None = None, medio_pago=None) -> bool:
     try:
-        get_supabase().table("gastos").insert({
+        row = {
             "chat_id": user["chat_id"], "fecha": fecha or _today(),
             "monto": _parse_monto(monto), "categoria": categoria, "descripcion": descripcion,
-        }).execute()
+        }
+        if medio_pago:  # solo si lo dieron (así no rompe antes de crear la columna)
+            row["medio_pago"] = medio_pago
+        get_supabase().table("gastos").insert(row).execute()
         return True
     except Exception as e:
         logger.error(f"Error adding expense: {e}")
         return False
 
 
-async def get_expenses(user: dict, desde=None, hasta=None, categoria=None) -> dict:
-    rows = _filter_gastos(await _all_gastos(user["chat_id"]), desde, hasta, categoria)
+async def get_expenses(user: dict, desde=None, hasta=None, categoria=None, medio_pago=None) -> dict:
+    rows = _filter_gastos(await _all_gastos(user["chat_id"]), desde, hasta, categoria, medio_pago)
     por_cat: dict[str, float] = {}
     total = 0.0
     gastos = []
@@ -148,7 +163,8 @@ async def get_expenses(user: dict, desde=None, hasta=None, categoria=None) -> di
         cat = str(r.get("categoria") or "Otros").strip() or "Otros"
         por_cat[cat] = por_cat.get(cat, 0.0) + m
         gastos.append({"n": pos, "fecha": r.get("fecha", ""), "monto": m,
-                       "categoria": cat, "descripcion": r.get("descripcion", "")})
+                       "categoria": cat, "descripcion": r.get("descripcion", ""),
+                       "medio_pago": r.get("medio_pago", "")})
     return {"total": total, "count": len(rows), "por_categoria": por_cat, "gastos": gastos}
 
 
@@ -174,6 +190,89 @@ async def delete_expense(user: dict, posicion: int, desde=None, hasta=None,
     get_supabase().table("gastos").delete().eq("id", r["id"]).execute()
     return {"descripcion": r.get("descripcion", ""), "monto": _parse_monto(r.get("monto")),
             "categoria": r.get("categoria", "")}
+
+
+# ── Cuotas / resumen de tarjeta ───────────────────────────────────────────────
+
+def _month_range(ref=None) -> tuple[str, str]:
+    """Primer y último día del mes (YYYY-MM-DD) en hora Argentina."""
+    d = ref or datetime.now(ARGENTINA_TZ)
+    first = d.replace(day=1)
+    nxt = first.replace(year=d.year + 1, month=1) if d.month == 12 else first.replace(month=d.month + 1)
+    last = nxt - timedelta(days=1)
+    return first.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d")
+
+
+def _cuota_status(row, ref=None):
+    """Para una compra en cuotas, calcula en qué número de cuota va este mes.
+    Devuelve (cuota_actual, restantes, monto_cuota). cuota_actual > total = terminada."""
+    d = ref or datetime.now(ARGENTINA_TZ)
+    try:
+        ini = datetime.strptime(str(row.get("fecha_inicio"))[:10], "%Y-%m-%d")
+    except Exception:
+        ini = d.replace(tzinfo=None)
+    meses = (d.year - ini.year) * 12 + (d.month - ini.month)
+    total = int(row.get("total_cuotas") or 0)
+    cuota_actual = meses + 1            # la cuota que se paga este mes
+    restantes = max(0, total - meses)   # cuántas faltan, incluida la de este mes
+    return cuota_actual, restantes, _parse_monto(row.get("monto_cuota"))
+
+
+async def add_cuota(user: dict, descripcion: str, monto_cuota, total_cuotas,
+                    categoria: str | None = None, fecha_inicio: str | None = None) -> bool:
+    """Registra una compra en cuotas (ej. 'la heladera en 12 cuotas de 50000')."""
+    try:
+        get_supabase().table("cuotas").insert({
+            "chat_id": user["chat_id"],
+            "descripcion": descripcion,
+            "monto_cuota": _parse_monto(monto_cuota),
+            "total_cuotas": int(total_cuotas),
+            "categoria": categoria or "Otros",
+            "fecha_inicio": fecha_inicio or _today(),
+        }).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding cuota: {e}")
+        return False
+
+
+async def get_cuotas(user: dict) -> list[dict]:
+    """Cuotas todavía activas (no terminadas), con en qué número van."""
+    res = get_supabase().table("cuotas").select("*").eq("chat_id", user["chat_id"]).execute()
+    out = []
+    for r in (res.data or []):
+        total = int(r.get("total_cuotas") or 0)
+        cuota_actual, restantes, monto = _cuota_status(r)
+        if cuota_actual > total:
+            continue  # ya se terminó de pagar
+        out.append({
+            "descripcion": r.get("descripcion", ""),
+            "monto_cuota": monto,
+            "cuota_actual": max(1, cuota_actual),
+            "total_cuotas": total,
+            "restantes": restantes,
+            "categoria": r.get("categoria", "Otros"),
+        })
+    out.sort(key=lambda c: c["restantes"])
+    return out
+
+
+async def get_resumen_tarjeta(user: dict) -> dict:
+    """Estimación de lo que viene de tarjeta este mes: compras en crédito del mes
+    + las cuotas activas. Devuelve totales y el detalle de cuotas."""
+    desde, hasta = _month_range()
+    gastos = _filter_gastos(await _all_gastos(user["chat_id"]), desde, hasta, None,
+                            medio_pago="crédito")
+    credito = sum(_parse_monto(g.get("monto")) for g in gastos)
+    cuotas = await get_cuotas(user)
+    cuotas_total = sum(c["monto_cuota"] for c in cuotas)
+    return {
+        "credito_mes": credito,
+        "cuotas_mes": cuotas_total,
+        "total": credito + cuotas_total,
+        "cuotas": cuotas,
+        "compras_credito": len(gastos),
+    }
 
 
 # ── Ingresos y balance ────────────────────────────────────────────────────────

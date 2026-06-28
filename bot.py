@@ -46,6 +46,7 @@ from google_services import (
     update_event,
 )
 from data_store import (
+    add_cuota,
     add_debt,
     add_expense,
     add_fixed_expense,
@@ -61,8 +62,10 @@ from data_store import (
     export_user_data,
     delete_task_by_position,
     get_balance,
+    get_cuotas,
     get_debts,
     get_expenses,
+    get_resumen_tarjeta,
     get_fixed_expenses,
     get_list_items,
     get_list_names,
@@ -327,6 +330,32 @@ def _is_expense_add_intent(text: str) -> bool:
     has_verb = any(s in t for s in _EXPENSE_ADD_STEMS)
     has_number = bool(re.search(r"\d", t))
     return has_verb and has_number
+
+
+_CARD_SUMMARY_PHRASES = (
+    "resumen de tarjeta", "resumen de la tarjeta", "cuánto me viene de tarjeta",
+    "cuanto me viene de tarjeta", "cuánto debo de tarjeta", "cuanto debo de tarjeta",
+    "cuánto de tarjeta", "cuanto de tarjeta", "mi tarjeta este mes", "cuánto gasté con tarjeta",
+    "cuanto gaste con tarjeta", "mis cuotas", "qué cuotas tengo", "que cuotas tengo",
+    "ver cuotas", "ver mis cuotas",
+)
+_CUOTA_QUERY_PHRASES = (
+    "mis cuotas", "qué cuotas", "que cuotas", "ver cuotas", "cuántas cuotas", "cuantas cuotas",
+)
+
+
+def _is_card_summary_intent(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in _CARD_SUMMARY_PHRASES)
+
+
+def _is_cuota_add_intent(text: str) -> bool:
+    t = text.lower()
+    if "cuota" not in t:                       # cubre "cuota" y "cuotas"
+        return False
+    if any(p in t for p in _CUOTA_QUERY_PHRASES):  # es una consulta, no un alta
+        return False
+    return bool(re.search(r"\d", t))           # "en 12 cuotas de 50000"
 
 
 def _is_task_add_intent(text: str) -> bool:
@@ -817,8 +846,48 @@ OPENAI_TOOLS = [
                         "type": "string",
                         "description": "Fecha en formato YYYY-MM-DD (opcional, por defecto hoy)",
                     },
+                    "medio_pago": {
+                        "type": "string",
+                        "enum": ["efectivo", "débito", "crédito", "transferencia", "mercadopago"],
+                        "description": (
+                            "Con qué pagó, SOLO si lo menciona. 'con la tarjeta'/'con la visa'/"
+                            "'en cuotas' = crédito; 'con débito'/'con la tarjeta de débito' = débito; "
+                            "'en efectivo'/'en mano' = efectivo; 'por transferencia' = transferencia; "
+                            "'con mercado pago' = mercadopago. Si no lo dice, omitilo."
+                        ),
+                    },
                 },
                 "required": ["monto", "categoria"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_cuota",
+            "description": (
+                "Registra una compra EN CUOTAS con tarjeta de crédito. Usala cuando el usuario "
+                "diga que compró algo en cuotas (ej. 'compré la heladera en 12 cuotas de 50000', "
+                "'saqué la tele en 6 cuotas'). NO uses add_expense para esto."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "descripcion": {"type": "string", "description": "Qué compró (ej. 'heladera')"},
+                    "monto_cuota": {
+                        "type": "number",
+                        "description": (
+                            "Monto de CADA cuota (no el total). Si el usuario da el total y la "
+                            "cantidad de cuotas, dividí: total / cantidad."
+                        ),
+                    },
+                    "total_cuotas": {"type": "integer", "description": "Cantidad de cuotas (ej. 12)"},
+                    "categoria": {
+                        "type": "string", "enum": EXPENSE_CATEGORIES,
+                        "description": "Categoría de la compra",
+                    },
+                },
+                "required": ["descripcion", "monto_cuota", "total_cuotas"],
             },
         },
     },
@@ -1399,8 +1468,20 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
             func_args["categoria"],
             func_args.get("descripcion", ""),
             func_args.get("fecha"),
+            func_args.get("medio_pago"),
         )
-        return {"ok": ok, "monto": func_args["monto"], "categoria": func_args["categoria"]}
+        return {"ok": ok, "monto": func_args["monto"], "categoria": func_args["categoria"],
+                "medio_pago": func_args.get("medio_pago")}
+    if func_name == "add_cuota":
+        ok = await add_cuota(
+            user,
+            func_args["descripcion"],
+            func_args["monto_cuota"],
+            func_args["total_cuotas"],
+            func_args.get("categoria"),
+        )
+        return {"ok": ok, "descripcion": func_args["descripcion"],
+                "monto_cuota": func_args["monto_cuota"], "total_cuotas": func_args["total_cuotas"]}
     if func_name == "get_expenses":
         return await get_expenses(
             user,
@@ -1754,6 +1835,13 @@ async def _call_openai(
             "mismos filtros de categoría/fechas). "
             "OJO: 'pagar el monotributo' o 'tengo que pagar X' es una TAREA futura, no un gasto. "
             "Solo es gasto si ya ocurrió ('pagué', 'gasté', 'compré'). "
+            "Si menciona CÓMO pagó (tarjeta, débito, efectivo, transferencia, mercado pago), pasá "
+            "ese 'medio_pago' en add_expense; si no lo dice, omitilo. "
+            "\n\nREGLA PARA COMPRAS EN CUOTAS: "
+            "Si compró algo EN CUOTAS (ej. 'la heladera en 12 cuotas de 50000', 'la tele en 6 cuotas'), "
+            "usá add_cuota (NO add_expense). 'monto_cuota' es lo que paga por mes (si da el total, "
+            "dividilo por la cantidad de cuotas). El resumen de tarjeta y las cuotas los muestra el "
+            "sistema solo, no los escribas vos. "
             "\n\nREGLA PARA INGRESOS Y BALANCE: "
             "Si el usuario dice que YA cobró/le pagaron/recibió dinero (verbo en pasado, con monto), "
             "registralo con add_income. Si pregunta por su balance, saldo o cuánto le queda, usá "
@@ -1858,6 +1946,8 @@ async def _call_openai(
         tool_choice = {"type": "function", "function": {"name": "add_income"}}
     elif _is_expense_query_intent(text):
         tool_choice = {"type": "function", "function": {"name": "get_expenses"}}
+    elif _is_cuota_add_intent(text):
+        tool_choice = {"type": "function", "function": {"name": "add_cuota"}}
     elif _is_expense_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_expense"}}
     else:
@@ -2171,6 +2261,24 @@ def _format_balance(bal: dict) -> str:
         f"⬇️ Gastos: {_fmt_money(gastos)}\n"
         f"{signo} *Neto: {_fmt_money(balance)}*"
     )
+
+
+def _format_resumen_tarjeta(data: dict) -> str:
+    total = data.get("total", 0)
+    if total <= 0:
+        return "💳 Por ahora no hay gastos de tarjeta ni cuotas activas este mes."
+    cuotas = data.get("cuotas", [])
+    lines = ["💳 *Resumen de tarjeta — este mes*\n", f"Te viene aprox. *{_fmt_money(total)}*"]
+    if data.get("compras_credito"):
+        lines.append(f"🛒 Compras en crédito: {_fmt_money(data.get('credito_mes', 0))}")
+    if cuotas:
+        lines.append(f"📆 Cuotas de este mes: {_fmt_money(data.get('cuotas_mes', 0))}")
+        for c in cuotas:
+            lines.append(
+                f"• {c['descripcion']}: {_fmt_money(c['monto_cuota'])} "
+                f"(cuota {c['cuota_actual']}/{c['total_cuotas']}, faltan {c['restantes']})"
+            )
+    return "\n".join(lines)
 
 
 def _format_deudas(data: dict) -> str:
@@ -2792,6 +2900,12 @@ async def _route_text(
         await message.reply_text(
             _format_deudas(deudas), parse_mode="Markdown", reply_markup=_build_deudas_menu(deudas),
         )
+        return
+
+    # Resumen de tarjeta / cuotas → lo armamos en código (no gasta tokens)
+    if _is_card_summary_intent(text):
+        resumen = await get_resumen_tarjeta(user)
+        await message.reply_text(_format_resumen_tarjeta(resumen), parse_mode="Markdown")
         return
 
     # OpenAI function calling

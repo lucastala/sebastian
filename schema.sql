@@ -84,3 +84,21 @@ CREATE TABLE IF NOT EXISTS public.pagos_procesados (
 );
 
 ALTER TABLE public.pagos_procesados ENABLE ROW LEVEL SECURITY;
+
+-- ── Gastos: medio de pago + compras en cuotas ────────────────────────────────
+-- Cómo se pagó cada gasto (efectivo/débito/crédito/transferencia/mercadopago).
+ALTER TABLE public.gastos ADD COLUMN IF NOT EXISTS medio_pago TEXT;
+
+-- Compras en cuotas con tarjeta (cada fila = una compra financiada en N cuotas).
+CREATE TABLE IF NOT EXISTS public.cuotas (
+    id           BIGSERIAL    PRIMARY KEY,
+    chat_id      BIGINT       NOT NULL,
+    descripcion  TEXT         NOT NULL,
+    monto_cuota  NUMERIC      NOT NULL,
+    total_cuotas INT          NOT NULL,
+    categoria    TEXT,
+    fecha_inicio DATE         NOT NULL,
+    creado       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.cuotas ENABLE ROW LEVEL SECURITY;
