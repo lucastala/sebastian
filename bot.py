@@ -2160,6 +2160,7 @@ def _build_gastos_cat_menu() -> InlineKeyboardMarkup:
                 emoji = CATEGORIA_EMOJI.get(cat, "")
                 row.append(InlineKeyboardButton(f"{emoji} {cat}", callback_data=f"menu_gcat_{j}"))
         rows.append(row)
+    rows.append([InlineKeyboardButton("💳 Tarjeta de crédito", callback_data="menu_tarjeta")])
     rows.append([InlineKeyboardButton("⬅️ Volver", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
@@ -2460,6 +2461,14 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text(
             "💸 *Gastos por categoría* — elija una:",
             parse_mode="Markdown", reply_markup=_build_gastos_cat_menu(),
+        )
+        return
+
+    if data == "menu_tarjeta":
+        resumen = await get_resumen_tarjeta(user)
+        await query.edit_message_text(
+            _format_resumen_tarjeta(resumen), parse_mode="Markdown",
+            reply_markup=_menu_back("menu_gastos", "⬅️ Volver a gastos"),
         )
         return
 
