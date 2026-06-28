@@ -137,7 +137,8 @@ async def _all_gastos(chat_id: int) -> list[dict]:
 
 
 async def add_expense(user: dict, monto, categoria: str, descripcion: str = "",
-                      fecha: str | None = None, medio_pago=None) -> bool:
+                      fecha: str | None = None, medio_pago=None):
+    """Devuelve el id del gasto insertado (int) o None si falló."""
     try:
         row = {
             "chat_id": user["chat_id"], "fecha": fecha or _today(),
@@ -145,11 +146,55 @@ async def add_expense(user: dict, monto, categoria: str, descripcion: str = "",
         }
         if medio_pago:  # solo si lo dieron (así no rompe antes de crear la columna)
             row["medio_pago"] = medio_pago
-        get_supabase().table("gastos").insert(row).execute()
-        return True
+        res = get_supabase().table("gastos").insert(row).execute()
+        return res.data[0]["id"] if res.data else None
     except Exception as e:
         logger.error(f"Error adding expense: {e}")
+        return None
+
+
+async def set_expense_medio(user: dict, expense_id: int, medio_pago: str) -> bool:
+    """Setea el medio de pago de un gasto existente (por id)."""
+    try:
+        get_supabase().table("gastos").update({"medio_pago": medio_pago}).eq(
+            "id", expense_id
+        ).eq("chat_id", user["chat_id"]).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error setting medio_pago: {e}")
         return False
+
+
+async def convert_expense_to_cuota(user: dict, expense_id: int, total_cuotas: int) -> dict | None:
+    """Convierte un gasto único en una compra en cuotas: lo borra y crea la cuota
+    con monto_cuota = monto / total_cuotas. Devuelve info o None."""
+    try:
+        chat_id = user["chat_id"]
+        res = get_supabase().table("gastos").select("*").eq("id", expense_id).eq(
+            "chat_id", chat_id
+        ).execute()
+        if not res.data:
+            return None
+        g = res.data[0]
+        total_monto = _parse_monto(g.get("monto"))
+        n = max(1, int(total_cuotas))
+        monto_cuota = round(total_monto / n, 2)
+        get_supabase().table("gastos").delete().eq("id", expense_id).eq(
+            "chat_id", chat_id
+        ).execute()
+        get_supabase().table("cuotas").insert({
+            "chat_id": chat_id,
+            "descripcion": g.get("descripcion") or g.get("categoria") or "Compra",
+            "monto_cuota": monto_cuota,
+            "total_cuotas": n,
+            "categoria": g.get("categoria") or "Otros",
+            "fecha_inicio": g.get("fecha") or _today(),
+        }).execute()
+        return {"descripcion": g.get("descripcion") or g.get("categoria") or "Compra",
+                "monto_cuota": monto_cuota, "total_cuotas": n, "total_monto": total_monto}
+    except Exception as e:
+        logger.error(f"Error converting expense to cuota: {e}")
+        return None
 
 
 async def get_expenses(user: dict, desde=None, hasta=None, categoria=None, medio_pago=None) -> dict:

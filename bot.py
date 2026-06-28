@@ -56,11 +56,13 @@ from data_store import (
     add_task,
     cancel_fixed_expense,
     clear_super_list,
+    convert_expense_to_cuota,
     delete_all_user_data,
     delete_expense,
     delete_list,
     export_user_data,
     delete_task_by_position,
+    set_expense_medio,
     get_balance,
     get_cuotas,
     get_debts,
@@ -168,6 +170,9 @@ _list_add_mode: dict[int, str] = {}
 
 # Chats esperando que escriban cómo quieren que Sebastian los llame
 _tratamiento_mode: set[int] = set()
+
+# Chats esperando que escriban una cantidad de cuotas → maps chat_id al id del gasto
+_cuota_count_mode: dict[int, int] = {}
 
 # Chats that just tapped "Nuevo listado" and we're waiting for them to type the name
 _awaiting_list_name: set[int] = set()
@@ -1462,7 +1467,7 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         )
         return {"ok": ok}
     if func_name == "add_expense":
-        ok = await add_expense(
+        expense_id = await add_expense(
             user,
             func_args["monto"],
             func_args["categoria"],
@@ -1470,7 +1475,8 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
             func_args.get("fecha"),
             func_args.get("medio_pago"),
         )
-        return {"ok": ok, "monto": func_args["monto"], "categoria": func_args["categoria"],
+        return {"ok": expense_id is not None, "id": expense_id,
+                "monto": func_args["monto"], "categoria": func_args["categoria"],
                 "medio_pago": func_args.get("medio_pago")}
     if func_name == "add_cuota":
         ok = await add_cuota(
@@ -1729,6 +1735,26 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                 "tool_call_id": tc.id, "role": "tool", "name": func_name,
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
+        elif func_name == "add_expense":
+            result = await _execute_tool(func_name, func_args, user)
+            messages.append({
+                "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
+            eid = result.get("id")
+            medio = (func_args.get("medio_pago") or "").lower()
+            if eid:
+                monto_txt = _fmt_money(func_args["monto"])
+                if not medio:
+                    # No dijo cómo pagó → preguntamos con botones.
+                    direct_reply = f"✅ Gasto registrado: *{monto_txt}* ({func_args['categoria']})"
+                    pending_keyboard = _build_pago_menu(eid)
+                elif medio in ("crédito", "credito", "tarjeta"):
+                    # Pagó con crédito → preguntamos si fue en cuotas.
+                    direct_reply = f"✅ Gasto en crédito: *{monto_txt}* ({func_args['categoria']})"
+                    pending_keyboard = _build_cuotas_menu(eid)
+                else:
+                    direct_reply = f"✅ Gasto registrado: *{monto_txt}* ({func_args['categoria']}) — {medio}"
         else:
             result = await _execute_tool(func_name, func_args, user)
             messages.append({
@@ -2263,6 +2289,29 @@ def _format_balance(bal: dict) -> str:
     )
 
 
+def _build_pago_menu(eid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💵 Efectivo", callback_data=f"payexp_{eid}_efectivo"),
+         InlineKeyboardButton("💳 Débito", callback_data=f"payexp_{eid}_débito")],
+        [InlineKeyboardButton("💳 Crédito", callback_data=f"payexp_{eid}_crédito"),
+         InlineKeyboardButton("🏦 Transferencia", callback_data=f"payexp_{eid}_transferencia")],
+        [InlineKeyboardButton("📱 Mercado Pago", callback_data=f"payexp_{eid}_mercadopago")],
+    ])
+
+
+def _build_cuotas_menu(eid: int) -> InlineKeyboardMarkup:
+    rows, fila = [], []
+    for n in (1, 3, 6, 12, 18, 24):
+        label = "1 pago" if n == 1 else f"{n} cuotas"
+        fila.append(InlineKeyboardButton(label, callback_data=f"cuotacnt_{eid}_{n}"))
+        if len(fila) == 3:
+            rows.append(fila); fila = []
+    if fila:
+        rows.append(fila)
+    rows.append([InlineKeyboardButton("✏️ Otra cantidad", callback_data=f"cuotacnt_{eid}_otra")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _format_resumen_tarjeta(data: dict) -> str:
     total = data.get("total", 0)
     if total <= 0:
@@ -2758,6 +2807,24 @@ async def _route_text(
         )
         return
 
+    # "¿En cuántas cuotas?" (opción otra) — el próximo mensaje es el número
+    if chat_id in _cuota_count_mode:
+        eid = _cuota_count_mode.pop(chat_id)
+        m = re.search(r"\d+", text)
+        if not m:
+            await message.reply_text("No entendí el número. Decime cuántas cuotas (ej. 9).")
+            return
+        info = await convert_expense_to_cuota(user, eid, int(m.group()))
+        if info:
+            await message.reply_text(
+                f"✅ Registrado en {info['total_cuotas']} cuotas de "
+                f"*{_fmt_money(info['monto_cuota'])}* ({info['descripcion']}).",
+                parse_mode="Markdown",
+            )
+        else:
+            await message.reply_text("⚠️ No pude registrar las cuotas.")
+        return
+
     # "¿Cómo querés que te llame?" mode — el próximo mensaje es el nombre/título
     if chat_id in _tratamiento_mode:
         _tratamiento_mode.discard(chat_id)
@@ -2971,6 +3038,59 @@ async def handle_create_conflict(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("⚠️ No se pudo crear el evento.")
 
 
+# ── Medio de pago / cuotas de un gasto ────────────────────────────────────────
+
+async def handle_pago_medio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user:
+        return
+    try:
+        _, eid_s, medio = query.data.split("_", 2)
+        eid = int(eid_s)
+    except (ValueError, AttributeError):
+        return
+    await set_expense_medio(user, eid, medio)
+    if medio in ("crédito", "credito", "tarjeta"):
+        await query.edit_message_text(
+            "💳 Crédito. ¿En cuántas cuotas?", reply_markup=_build_cuotas_menu(eid),
+        )
+    else:
+        await query.edit_message_text(f"✅ Anotado: pagado con {medio}.")
+
+
+async def handle_cuotas_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user:
+        return
+    try:
+        _, eid_s, n = query.data.split("_", 2)
+        eid = int(eid_s)
+    except (ValueError, AttributeError):
+        return
+    if n == "otra":
+        _cuota_count_mode[chat_id] = eid
+        await query.edit_message_text("✏️ ¿En cuántas cuotas? Escribime el número (ej. 9).")
+        return
+    if n == "1":
+        await query.edit_message_text("✅ Listo, un solo pago con crédito.")
+        return
+    info = await convert_expense_to_cuota(user, eid, int(n))
+    if info:
+        await query.edit_message_text(
+            f"✅ Registrado en {info['total_cuotas']} cuotas de "
+            f"*{_fmt_money(info['monto_cuota'])}* ({info['descripcion']}).",
+            parse_mode="Markdown",
+        )
+    else:
+        await query.edit_message_text("⚠️ No pude registrar las cuotas. Probá de nuevo.")
+
+
 # ── Delete event confirmation callback ───────────────────────────────────────
 
 async def handle_delete_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3049,8 +3169,8 @@ async def _photo_gasto(message, user: dict, data: dict) -> None:
     if categoria not in EXPENSE_CATEGORIES:
         categoria = "Otros"
     descripcion = (data.get("descripcion") or "ticket").strip()
-    ok = await add_expense(user, monto, categoria, descripcion, data.get("fecha"))
-    if not ok:
+    eid = await add_expense(user, monto, categoria, descripcion, data.get("fecha"))
+    if not eid:
         await message.reply_text("⚠️ Leí el ticket pero no pude guardar el gasto. Intente de nuevo.")
         return
 
@@ -3061,9 +3181,12 @@ async def _photo_gasto(message, user: dict, data: dict) -> None:
         f"_{descripcion}_"
     )
     try:
-        await message.reply_text(texto, parse_mode="Markdown")
+        await message.reply_text(texto, parse_mode="Markdown", reply_markup=_build_pago_menu(eid))
     except Exception:
-        await message.reply_text(f"✅ Gasto registrado: {categoria} — {_fmt_money(monto)} ({descripcion})")
+        await message.reply_text(
+            f"✅ Gasto registrado: {categoria} — {_fmt_money(monto)} ({descripcion})",
+            reply_markup=_build_pago_menu(eid),
+        )
 
 
 async def _photo_tareas(message, user: dict, data: dict) -> None:
@@ -3342,6 +3465,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
     app.add_handler(CallbackQueryHandler(handle_delete_event, pattern=r"^delEvent"))
     app.add_handler(CallbackQueryHandler(handle_create_conflict, pattern=r"^createConflict_"))
+    app.add_handler(CallbackQueryHandler(handle_pago_medio, pattern=r"^payexp_"))
+    app.add_handler(CallbackQueryHandler(handle_cuotas_count, pattern=r"^cuotacnt_"))
     app.add_handler(CallbackQueryHandler(handle_menu, pattern=r"^menu_"))
 
     logger.info("Bot starting — polling for updates")
