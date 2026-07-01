@@ -2050,6 +2050,13 @@ async def _call_openai(
             "correspondientes JUNTAS en la misma respuesta. Si una acción depende del resultado "
             "de otra (ej. necesitás ver la lista para saber un número), encadenala en la ronda "
             "siguiente. NUNCA completes solo una parte del pedido y dejes el resto sin hacer. "
+            "\n\nDESPUÉS DE EJECUTAR TOOLS: el sistema arma y muestra solo las confirmaciones de "
+            "eventos creados, recordatorios agregados, gastos y listados (NUNCA las repitas ni las "
+            "reformules). Con eso en cuenta: si el pedido quedó COMPLETO y todo lo hecho ya tiene "
+            "confirmación del sistema, respondé EXACTAMENTE 'Listo.' y nada más. Si hiciste alguna "
+            "acción SIN confirmación del sistema (ej. cancelar un recordatorio, marcar una deuda "
+            "pagada), confirmala en UNA frase breve. Si FALTA información o una parte del pedido "
+            "quedó sin hacer, respondé SOLO con la pregunta o aclaración necesaria. "
             "\n\nREGLA PARA CREAR EVENTOS (create_event): "
             "La hora es SIEMPRE hora LOCAL de Argentina. Pasala EXACTAMENTE como la dijo el "
             "usuario y NUNCA la conviertas a UTC ni le sumes/restes horas ('11:50 am' → 11:50, "
@@ -2104,10 +2111,14 @@ async def _call_openai(
             "Para verlos usá get_reminders y para cancelarlos cancel_reminder por número. "
             "RECORDATORIO RELATIVO A UN EVENTO ('agendá la reunión y recordame una hora antes', "
             "'avisame 10 min antes'): si el evento TIENE hora, calculá la hora del aviso restando "
-            "ese rato y creá AMBOS (create_event + add_reminder). Si el evento NO tiene hora, es "
-            "IMPOSIBLE calcular el aviso: NO llames NINGUNA herramienta, NO inventes una hora, NO "
-            "agendes nada; respondé ÚNICAMENTE preguntando a qué hora es el evento (ej. '¿A qué "
-            "hora es la reunión? Así le pongo el aviso una hora antes.')."
+            "ese rato y creá AMBOS (create_event + add_reminder) JUNTOS. Si el evento NO tiene "
+            "hora, NO llames NINGUNA herramienta en esa respuesta: ni add_reminder NI TAMPOCO "
+            "create_event (si agendás el evento sin hora queda 'todo el día' y el aviso sigue "
+            "siendo incalculable; y NUNCA inventes una hora que el usuario no dijo). Respondé "
+            "ÚNICAMENTE preguntando la hora. Ejemplo trabajado: U: 'agendame reunión el martes y "
+            "poneme un recordatorio una hora antes' → vos, SIN llamar tools: '¿A qué hora es la "
+            "reunión? Así le pongo el aviso una hora antes.' → U: 'a las 15' → recién AHÍ: "
+            "create_event(martes 15:00) + add_reminder(martes 14:00), los dos juntos."
             "\n\nREGLA PARA AGREGAR TAREAS (MUY IMPORTANTE): "
             "Cuando el usuario pida agregar/anotar/sumar/recordar algo que tiene que hacer, "
             "o exprese un pendiente sin hora de calendario (ej. 'comprar pan', 'llamar al médico', "
@@ -2272,7 +2283,6 @@ async def _call_openai(
     pending_keyboard: InlineKeyboardMarkup | None = None
     show_tasks = False  # only append the tasks list when the list actually changed
     direct_replies: list[str] = []  # respuestas armadas por CÓDIGO, acumuladas ronda a ronda
-    last_round_had_direct = False
     seen_event_sigs: set = set()  # anti-duplicado de create_event a través de TODAS las rondas
     rounds = 0
 
@@ -2291,7 +2301,6 @@ async def _call_openai(
         if pk is not None:
             pending_keyboard = pk
         show_tasks = show_tasks or st
-        last_round_had_direct = dr is not None
         if dr is not None:
             direct_replies.append(dr)
         response = await _openai_chat(
@@ -2304,12 +2313,16 @@ async def _call_openai(
 
     if direct_replies:
         # Las respuestas del código van TAL CUAL (el modelo no las reformula: no
-        # redondea ni inventa). Si la ÚLTIMA ronda hizo acciones sin respuesta de
-        # código (ej. cancel_reminder después de mostrar la lista), sumamos el texto
-        # del modelo para que esa acción también quede confirmada.
+        # redondea ni inventa). El texto final del modelo se AGREGA solo si aporta
+        # algo — una pregunta pendiente ('¿a qué hora es la reunión?') o la
+        # confirmación de una acción sin render de código (ej. cancel_reminder).
+        # Contrato del prompt: el modelo responde EXACTAMENTE 'Listo.' cuando no
+        # tiene nada que agregar. Antes se descartaba siempre → se perdían las
+        # preguntas y el pedido quedaba a medias sin que el usuario lo supiera.
         reply = "\n\n".join(direct_replies)
-        if not last_round_had_direct and msg.content:
-            reply += f"\n\n{msg.content}"
+        extra = (msg.content or "").strip()
+        if extra and extra.lower().rstrip(".!") != "listo":
+            reply += f"\n\n{extra}"
     else:
         reply = msg.content or "Listo."
     _add_to_history(chat_id, text, reply)

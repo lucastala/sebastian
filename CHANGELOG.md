@@ -4,6 +4,25 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Combo sin hora: el modelo agendaba igual (a veces inventando 09:00) y la
+  pregunta '¿a qué hora?' se perdía.**
+  Retest post-fix anterior: "agendame reunion el martes... y poneme un recordatorio una
+  hora antes" (sin hora) creó el evento TODO EL DÍA sin recordatorio y sin preguntar nada.
+  Experimento (4/4): el modelo creaba el evento en ronda 1 (3/4 inventando hora 09:00) y
+  preguntaba la hora en ronda 2 COMO TEXTO... que la composición descartaba (regla
+  last_round_had_direct). Dos fixes:
+  1. **Prompt**: regla RECORDATORIO RELATIVO reforzada con ejemplo trabajado (patrón que
+     generaliza): sin hora → NI create_event NI add_reminder, preguntar PRIMERO y crear
+     los dos juntos al tener la hora. Verificado: ahora pregunta sin llamar tools.
+  2. **Contrato 'Listo.'**: el texto final del modelo ya no se descarta; se agrega salvo
+     que sea exactamente 'Listo.' (regla nueva en el prompt: 'Listo.' si todo tiene
+     confirmación del sistema; frase breve si hizo algo sin confirmación de código, ej.
+     cancel_reminder; SOLO la pregunta si falta info). Reemplaza la heurística
+     last_round_had_direct, que perdía preguntas.
+  Verificado end-to-end (exp_e2e_v2.py): pregunta la hora → 'a las 15' → ambas acciones
+  con ambas confirmaciones; lista+cancelar conserva la confirmación; evento simple sin
+  narración duplicada.
+
 - **bot.py — Combo evento+recordatorio en dos turnos: el guard de fecha descartaba el evento
   y el loop cortaba los pedidos encadenados.**
   Síntoma real (transcript): "agendame el martes reunion de prueba y un recordatorio una
