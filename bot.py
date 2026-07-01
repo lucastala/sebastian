@@ -30,6 +30,7 @@ from database import (
     get_user,
     get_user_reminders,
     register_message,
+    update_user_orden,
     update_user_resumen,
     update_user_tratamiento,
     use_activation_code,
@@ -1314,13 +1315,18 @@ def _format_event_confirmation(ev: dict) -> str:
     return txt
 
 
-def _sort_tasks(tasks: list[dict]) -> list[dict]:
-    """No-date tasks first, then dated tasks most-distant→most-recent (top→bottom)."""
+def _orden_cercana(user: dict) -> bool:
+    return str(user.get("orden_tareas") or "").lower() == "cercana"
+
+
+def _sort_tasks(tasks: list[dict], cercana: bool = False) -> list[dict]:
+    """Sin fecha primero, luego con fecha. cercana=False → de más lejana a más cercana
+    (default); cercana=True → de más cercana a más lejana. Debe coincidir con el borrado."""
     no_date = [t for t in tasks if not str(t.get("fecha", "")).strip()]
     dated = sorted(
         [t for t in tasks if str(t.get("fecha", "")).strip()],
         key=lambda t: str(t["fecha"]),
-        reverse=True,
+        reverse=not cercana,
     )
     return no_date + dated
 
@@ -1383,7 +1389,7 @@ async def build_tasks_footer(user: dict) -> str:
         )
 
     lines = ["📋 *Tareas pendientes:*"]
-    for i, task in enumerate(_sort_tasks(tasks), 1):
+    for i, task in enumerate(_sort_tasks(tasks, _orden_cercana(user)), 1):
         fecha = str(task.get("fecha", "")).strip()
         if fecha:
             lines.append(f"{i}. *{_format_fecha(fecha)}* — {task['tarea']}")
@@ -1415,7 +1421,7 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         # Return them numbered in the SAME order the user sees (canonical)
         return [
             {"n": i, "tarea": t.get("tarea", ""), "fecha": str(t.get("fecha", "")).strip()}
-            for i, t in enumerate(_sort_tasks(tasks), 1)
+            for i, t in enumerate(_sort_tasks(tasks, _orden_cercana(user)), 1)
         ]
     if func_name == "delete_task":
         positions = func_args.get("posiciones") or []
@@ -2187,6 +2193,10 @@ def _tratamiento_label(user: dict) -> str:
     return t if t else "Neutro"
 
 
+def _orden_label(user: dict) -> str:
+    return "primero las cercanas" if _orden_cercana(user) else "primero las lejanas"
+
+
 def _rows_to_csv(rows: list[dict]) -> bytes:
     """Convierte filas (dicts) a CSV. Saca columnas internas (id/chat_id). BOM para Excel."""
     cols = [k for k in rows[0].keys() if k not in ("id", "chat_id")]
@@ -2218,6 +2228,7 @@ def _format_config(user: dict) -> str:
         "⚙️ *Configuración*\n\n"
         f"👤 Te llamo: *{_tratamiento_label(user)}*\n"
         f"🌅 Resumen diario: *{_resumen_label(user)}*\n"
+        f"🔀 Orden de tareas: *{_orden_label(user)}*\n"
         f"🔑 Suscripción: *{estado_label}*{venc_line}\n"
         f"🔗 Cuenta de Google: *{google}*"
     )
@@ -2227,6 +2238,7 @@ def _build_config_menu(user: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"👤 Cómo te llamo: {_tratamiento_label(user)}", callback_data="menu_tratamiento")],
         [InlineKeyboardButton(f"🌅 Resumen diario: {_resumen_label(user)}", callback_data="menu_resumen")],
+        [InlineKeyboardButton(f"🔀 Orden de tareas: {_orden_label(user)}", callback_data="menu_orden")],
         [InlineKeyboardButton("🔗 Reconectar Google", callback_data="menu_reconnect")],
         [InlineKeyboardButton("📤 Exportar mis datos", callback_data="menu_export")],
         [InlineKeyboardButton("🗑️ Borrar mis datos", callback_data="menu_delete")],
@@ -2701,6 +2713,16 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data == "menu_trato_none":
         _tratamiento_mode.discard(chat_id)
         await update_user_tratamiento(chat_id, None)
+        user = await get_user(chat_id)
+        await query.edit_message_text(
+            _format_config(user), parse_mode="Markdown",
+            reply_markup=_build_config_menu(user),
+        )
+        return
+
+    if data == "menu_orden":
+        nuevo = "lejana" if _orden_cercana(user) else "cercana"
+        await update_user_orden(chat_id, nuevo)
         user = await get_user(chat_id)
         await query.edit_message_text(
             _format_config(user), parse_mode="Markdown",

@@ -36,12 +36,17 @@ def _today() -> str:
 
 # ── Tareas ────────────────────────────────────────────────────────────────────
 
-def _sort_pending(rows: list[dict]) -> list[dict]:
-    """Sin fecha primero, luego con fecha de más lejana a más cercana (igual que el footer)."""
+def _es_cercana(user: dict) -> bool:
+    return str(user.get("orden_tareas") or "").lower() == "cercana"
+
+
+def _sort_pending(rows: list[dict], cercana: bool = False) -> list[dict]:
+    """Sin fecha primero, luego con fecha. cercana=False → de más lejana a más cercana
+    (default); cercana=True → de más cercana a más lejana. Debe coincidir con el display."""
     no_date = [r for r in rows if not str(r.get("fecha") or "").strip()]
     dated = sorted(
         [r for r in rows if str(r.get("fecha") or "").strip()],
-        key=lambda r: str(r["fecha"]), reverse=True,
+        key=lambda r: str(r["fecha"]), reverse=not cercana,
     )
     return no_date + dated
 
@@ -76,7 +81,7 @@ async def update_task_fecha(user: dict, task_id: str, fecha: str) -> bool:
 
 
 async def delete_task_by_position(user: dict, position: int) -> str | None:
-    rows = _sort_pending(await get_pending_tasks(user))
+    rows = _sort_pending(await get_pending_tasks(user), _es_cercana(user))
     if position < 1 or position > len(rows):
         return None
     row = rows[position - 1]
@@ -88,7 +93,7 @@ async def delete_task_by_position(user: dict, position: int) -> str | None:
 
 async def update_task(user: dict, posicion: int, nuevo_nombre: str | None = None,
                       nueva_fecha: str | None = None) -> bool:
-    rows = _sort_pending(await get_pending_tasks(user))
+    rows = _sort_pending(await get_pending_tasks(user), _es_cercana(user))
     if posicion < 1 or posicion > len(rows):
         return False
     row = rows[posicion - 1]
