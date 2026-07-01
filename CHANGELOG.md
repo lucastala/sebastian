@@ -4,6 +4,22 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Borrado de evento con match FLEXIBLE por palabras clave.**
+  El usuario parafrasea el título ("borrame el cable 19 por 2,5" para "Averiguar
+  precio de mangueras de 19 por 2,5 milímetros con cable Sur") y el borrado, que
+  matcheaba por substring exacto, decía "no existe". Nuevos helpers
+  `_norm_event_tokens` / `_event_match_score` / `_best_event_matches` (sin acentos,
+  sin muletillas, score = fracción de palabras clave del pedido presentes en el
+  título, umbral 0.5). El flujo de `delete_event` usa match flexible y, si la
+  búsqueda `q` de Google no engancha, cae a `get_upcoming_events` (nueva, ventana
+  -1..+120 días) y matchea ahí.
+
+- **bot.py — Anti-duplicado de create_event.**
+  Con `tool_choice="required"` (para permitir varios eventos en un mensaje) el modelo
+  a veces repetía la MISMA llamada create_event y se creaba el evento dos veces. Se
+  descartan create_event con firma idéntica (nombre+fecha+hora+hora_fin+repetir+hasta)
+  dentro de la misma tanda.
+
 - **google_services.py — Borrar una serie recurrente borra TODA la serie.**
   Con `singleEvents=True` el borrado recibía el id de una INSTANCIA y Google sacaba
   solo ese día. Ahora `delete_event` hace un `get` del evento: si tiene

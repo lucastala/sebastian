@@ -122,6 +122,16 @@ async def _get_calendar_events(
     return await loop.run_in_executor(None, _get)
 
 
+async def get_upcoming_events(user: dict, dias: int = 120) -> list[dict]:
+    """Lista los eventos en una ventana amplia (desde ayer hasta +`dias`), para
+    poder hacer un match flexible por nombre cuando la búsqueda `q` de Google no
+    engancha la paráfrasis del usuario."""
+    now = datetime.now(ARGENTINA_TZ)
+    start = now - timedelta(days=1)
+    end = now + timedelta(days=dias)
+    return await _get_calendar_events(user, start, end)
+
+
 async def search_event(user: dict, query: str) -> list[dict]:
     creds = await refresh_user_credentials(user)
     loop = asyncio.get_running_loop()

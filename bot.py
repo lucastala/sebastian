@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -43,6 +44,7 @@ from google_services import (
     delete_event,
     get_events_by_date,
     get_today_events,
+    get_upcoming_events,
     search_event,
     update_event,
 )
@@ -1373,6 +1375,40 @@ def _format_fecha(fecha_str: str) -> str:
         return fecha_str
 
 
+_EVENT_MATCH_FILLERS = {
+    "el", "la", "los", "las", "de", "del", "por", "con", "un", "una", "y", "a",
+    "en", "que", "para", "al", "lo", "mi", "su", "the", "of",
+}
+
+
+def _norm_event_tokens(s: str) -> set[str]:
+    """Normaliza un texto a un set de palabras clave (sin acentos, sin muletillas)
+    para comparar el pedido del usuario contra el título del evento."""
+    s = unicodedata.normalize("NFKD", (s or "").lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    toks = re.findall(r"[a-z0-9]+(?:[.,][0-9]+)?", s)
+    return {t for t in toks if t not in _EVENT_MATCH_FILLERS and len(t) > 1}
+
+
+def _event_match_score(query: str, nombre: str) -> float:
+    """Fracción de palabras clave del pedido que aparecen en el título del evento
+    (0.0 a 1.0). Permite matchear paráfrasis ('averiguar el cable 19 por 2,5' con
+    'Averiguar precio de mangueras de 19 por 2,5 milímetros con cable Sur')."""
+    q = _norm_event_tokens(query)
+    if not q:
+        return 0.0
+    return len(q & _norm_event_tokens(nombre)) / len(q)
+
+
+def _best_event_matches(query: str, events: list[dict], umbral: float = 0.5) -> list[dict]:
+    """Ordena los eventos por cuánto se parecen al pedido y devuelve los que superan
+    el umbral, del más parecido al menos."""
+    scored = [(_event_match_score(query, e.get("nombre", "")), e) for e in events]
+    scored = [(s, e) for s, e in scored if s >= umbral]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [e for _, e in scored]
+
+
 def _format_event_confirmation(ev: dict) -> str:
     """Confirmación determinística de un evento creado, armada con los datos REALES que
     devolvió Google (hora exacta + link). No la escribe el modelo: así nunca redondea
@@ -1710,6 +1746,7 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
     direct_reply: str | None = None
     event_confirmations: list[str] = []  # una por cada evento creado en esta tanda
     extra_confirmations: list[str] = []  # otras acciones de la misma tanda (recordatorios, etc.)
+    seen_event_sigs: set = set()  # para descartar create_event duplicados en la misma tanda
 
     # Texto original del usuario (último mensaje 'user') — para decidir si mencionó
     # una fecha o el modelo la inventó. OJO: `messages` mezcla dicts con objetos
@@ -1729,6 +1766,22 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
 
         if func_name in ("update_task", "delete_task"):
             show_tasks = True
+
+        # Anti-duplicado: con tool_choice="required" el modelo a veces repite la MISMA
+        # llamada create_event dos veces en una tanda → se creaba el evento duplicado.
+        if func_name == "create_event":
+            sig = (
+                (func_args.get("nombre") or "").strip().lower(),
+                func_args.get("fecha"), func_args.get("hora"),
+                func_args.get("hora_fin"), func_args.get("repetir"), func_args.get("hasta"),
+            )
+            if sig in seen_event_sigs:
+                messages.append({
+                    "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                    "content": "Evento duplicado ignorado (ya se creó en esta misma tanda).",
+                })
+                continue
+            seen_event_sigs.add(sig)
 
         # Evento recurrente ('todos los días', 'cada semana') sin día de inicio:
         # arranca HOY. No tiene sentido preguntar "¿qué día?" para algo que se repite.
@@ -1766,14 +1819,22 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
         elif func_name == "delete_event":
             query = func_args.get("query", "")
             fecha = func_args.get("fecha")
-            # Search for the event internally
+            # Buscamos el evento internamente, con match FLEXIBLE (por palabras clave):
+            # el usuario suele parafrasear el título ("el cable 19 por 2,5" para
+            # "Averiguar precio de mangueras de 19 por 2,5 milímetros con cable Sur").
             if fecha:
                 events = await get_events_by_date(user, fecha)
-                matched = [e for e in events if query.lower() in e.get("nombre", "").lower()]
+                matched = _best_event_matches(query, events)
                 if not matched:
-                    matched = events  # fallback: show all events for that date
+                    matched = events  # fallback: mostrar los eventos de ese día
             else:
-                matched = await search_event(user, query)
+                events = await search_event(user, query)
+                matched = _best_event_matches(query, events)
+                if not matched:
+                    # La búsqueda `q` de Google no enganchó → probamos contra la agenda
+                    # próxima con el mismo match flexible.
+                    events = await get_upcoming_events(user)
+                    matched = _best_event_matches(query, events)
 
             if not matched:
                 messages.append({
