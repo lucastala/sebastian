@@ -2722,12 +2722,21 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if data == "menu_orden":
         nuevo = "lejana" if _orden_cercana(user) else "cercana"
-        await update_user_orden(chat_id, nuevo)
-        user = await get_user(chat_id)
-        await query.edit_message_text(
-            _format_config(user), parse_mode="Markdown",
-            reply_markup=_build_config_menu(user),
-        )
+        ok = await update_user_orden(chat_id, nuevo)
+        if ok:
+            user = await get_user(chat_id)
+        try:
+            await query.edit_message_text(
+                _format_config(user), parse_mode="Markdown",
+                reply_markup=_build_config_menu(user),
+            )
+        except Exception:
+            pass  # "Message is not modified" u otro edit inofensivo
+        if not ok:
+            await query.message.reply_text(
+                "⚠️ No pude guardar el orden. Falta crear la columna `orden_tareas` "
+                "en la base de datos.", parse_mode="Markdown",
+            )
         return
 
     if data == "menu_resumen":
