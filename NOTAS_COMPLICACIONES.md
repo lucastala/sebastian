@@ -64,7 +64,18 @@ gpt-4.1 (ver carpeta scratchpad: exp_*.py) antes de dar por buena una hipótesis
    la serie). Borrar una instancia de serie borra solo ese día → hay que borrar el evento
    MAESTRO (recurringEventId) para borrar toda la serie.
 
-8. **Robustez de plataforma.** Faltaba error handler global (excepciones morían en silencio,
+8. **La conversación es MULTI-TURNO; los guards de código no.** "agendame el martes X y
+   recordame antes" → "¿a qué hora?" → "a las 15": el modelo llamaba AMBAS tools bien
+   (verificado 17/17), pero el guard anti-"fecha inventada" miraba solo el ÚLTIMO mensaje
+   ("a las 15", sin fecha) y descartaba el evento; encima la pregunta "¿para qué día?"
+   era PISADA por la confirmación del recordatorio, y el early-return del loop cortaba
+   los combos secuenciales ("mostrame recordatorios y cancelá el 2"). Moraleja triple:
+   (a) todo guard determinístico debe mirar la VENTANA de conversación, no el último
+   mensaje; (b) nunca pisar un direct_reply con otro: concatenar; (c) el loop de tools
+   no debe cortar mientras el modelo tenga acciones pendientes. Antes de culpar al
+   modelo, reproducir con experimento: acá el modelo estaba BIEN y el código lo saboteaba.
+
+9. **Robustez de plataforma.** Faltaba error handler global (excepciones morían en silencio,
    "No error handlers are registered"). Mensajes > 4096 chars rompían Telegram. Markdown
    frágil con contenido del usuario (usar fallback a texto plano). Todo con try/except +
    `_reply_long` (parte en trozos + cae a plano).
