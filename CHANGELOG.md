@@ -4,6 +4,12 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — "mostrame la lista del súper" mostraba las TAREAS.**
+  En `_route_text`, el handler de lista de tareas (`_is_task_list_request`) corre antes
+  que el del súper, y "la lista del super" contiene "la lista" → ganaba tareas y hacía
+  return. Fix: `_is_task_list_request` ahora devuelve False si el texto menciona
+  super/súper/compras/listado (mismo patrón que la exclusión de gasto/fijo que ya había).
+
 - **bot.py — REVERTIDO el guardrail de recurrencia por aliases (era el enfoque equivocado).**
   Se probó empíricamente contra gpt-4.1 (scratchpad/exp_recurrencia*.py): con el prompt
   actual el modelo YA interpreta bien recurrencias, incluso frases novedosas que ninguna

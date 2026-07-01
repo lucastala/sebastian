@@ -447,6 +447,9 @@ def _is_task_list_request(text: str) -> bool:
         return True
     if "gasto" in t or "fijo" in t:
         return False
+    # "lista del súper", "lista de compras", "mis listados" NO son la lista de tareas.
+    if "super" in t or "súper" in t or "compras" in t or "listado" in t:
+        return False
     # "agregame en la lista de tareas X" is an ADD, not a request to view the list
     if any(v in t for v in _TASK_ADD_VERBS):
         return False
