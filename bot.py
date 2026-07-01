@@ -1320,15 +1320,16 @@ def _orden_cercana(user: dict) -> bool:
 
 
 def _sort_tasks(tasks: list[dict], cercana: bool = False) -> list[dict]:
-    """Sin fecha primero, luego con fecha. cercana=False → de más lejana a más cercana
-    (default); cercana=True → de más cercana a más lejana. Debe coincidir con el borrado."""
+    """cercana=False (default): sin fecha arriba, luego fechas de más lejana a más cercana.
+    cercana=True: fechas de más cercana a más lejana arriba, y las SIN fecha al final
+    (para que lo más urgente quede primero). Debe coincidir con el borrado."""
     no_date = [t for t in tasks if not str(t.get("fecha", "")).strip()]
     dated = sorted(
         [t for t in tasks if str(t.get("fecha", "")).strip()],
         key=lambda t: str(t["fecha"]),
         reverse=not cercana,
     )
-    return no_date + dated
+    return (dated + no_date) if cercana else (no_date + dated)
 
 
 # ── Calendar keyboard ─────────────────────────────────────────────────────────

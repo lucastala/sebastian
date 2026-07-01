@@ -41,14 +41,14 @@ def _es_cercana(user: dict) -> bool:
 
 
 def _sort_pending(rows: list[dict], cercana: bool = False) -> list[dict]:
-    """Sin fecha primero, luego con fecha. cercana=False → de más lejana a más cercana
-    (default); cercana=True → de más cercana a más lejana. Debe coincidir con el display."""
+    """Igual que el display (bot._sort_tasks). cercana=False: sin fecha arriba, luego
+    lejana→cercana. cercana=True: cercana→lejana arriba, sin fecha al final."""
     no_date = [r for r in rows if not str(r.get("fecha") or "").strip()]
     dated = sorted(
         [r for r in rows if str(r.get("fecha") or "").strip()],
         key=lambda r: str(r["fecha"]), reverse=not cercana,
     )
-    return no_date + dated
+    return (dated + no_date) if cercana else (no_date + dated)
 
 
 async def get_pending_tasks(user: dict) -> list[dict]:
