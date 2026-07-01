@@ -670,8 +670,11 @@ OPENAI_TOOLS = [
                     "hora": {
                         "type": "string",
                         "description": (
-                            "Hora de inicio en formato HH:MM 24h (opcional). Copiá los minutos "
-                            "exactos que diga el usuario, sin redondear. Si solo da una franja del "
+                            "Hora de inicio en formato HH:MM 24h (opcional). Es HORA LOCAL de "
+                            "Argentina: pasala EXACTAMENTE como la dice el usuario y NUNCA la "
+                            "conviertas a UTC ni le sumes/restes horas por zona horaria. "
+                            "'11:50 am' → 11:50; '11:50 pm' → 23:50; '3 de la tarde' → 15:00. "
+                            "Copiá los minutos exactos, sin redondear. Si solo da una franja del "
                             "día, traducila (mañana=09:00, mediodía=13:00, tarde=16:00, noche=20:00). "
                             "Si no hay ninguna referencia horaria, omitila: será evento de todo el día."
                         ),
@@ -1836,6 +1839,11 @@ async def _call_openai(
             "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), usá HH:00. "
             "Si da minutos exactos ('19:30', 'siete y media'), respetalos TAL CUAL: NUNCA redondees. "
             "\n\nREGLA PARA CREAR EVENTOS (create_event): "
+            "La hora es SIEMPRE hora LOCAL de Argentina. Pasala EXACTAMENTE como la dijo el "
+            "usuario y NUNCA la conviertas a UTC ni le sumes/restes horas ('11:50 am' → 11:50, "
+            "no 14:50; '11:50 pm' → 23:50). "
+            "Si el usuario CORRIGE la hora o fecha de algo que acabás de agendar (ej. 'no, a las "
+            "11:50', 'era el jueves'), usá update_event para MODIFICAR ese evento; NO crees uno nuevo. "
             "Pasá la hora de inicio en 'hora' (HH:MM, 24h) copiando exactamente lo que dijo el "
             "usuario. Si da un rango ('de 19 a 20', 'de 9 a 10:30'), pasá también 'hora_fin'. "
             "Si da una duración ('reunión de 2 horas', 'media hora'), pasá 'duracion_min' en minutos. "
