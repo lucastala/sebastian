@@ -1,5 +1,18 @@
 """Textos compartidos entre el bot y el servidor de OAuth."""
 
+# Mensaje de bienvenida corto (apenas conecta Google). En vez del manual completo,
+# ejemplos concretos para que pruebe YA. El manual completo queda a un botón.
+BIENVENIDA_CONECTADO = (
+    "🎉 *¡Listo! Ya podés usar Sebastian.*\n\n"
+    "Escribime como le hablarías a una persona. Probá mandándome, por ejemplo:\n\n"
+    "📋 *comprar pan* → te lo anoto como tarea\n"
+    "📅 *reunión el viernes a las 10* → lo agendo\n"
+    "💸 *gasté 5000 en el súper* → lo registro\n"
+    "⏰ *recordame llamar al médico mañana a las 3*\n\n"
+    "También entiendo *audios* 🎤 y *fotos* de tickets 📷.\n\n"
+    "Probá con cualquiera ahora mismo 👇"
+)
+
 # Manual corto que se abre desde el botón al pie de la lista de tareas.
 # Solo lo esencial del día a día; el botón de abajo abre INSTRUCCIONES_TEXTO completo.
 MANUAL_TAREAS = (

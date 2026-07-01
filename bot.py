@@ -36,7 +36,7 @@ from database import (
     use_activation_code,
     wipe_user_account_extras,
 )
-from texts import INSTRUCCIONES_TEXTO, MANUAL_TAREAS
+from texts import BIENVENIDA_CONECTADO, INSTRUCCIONES_TEXTO, MANUAL_TAREAS
 from google_services import (
     GoogleAuthExpiredError,
     create_event,
@@ -3398,8 +3398,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if activo and user.get("access_token"):
         await update.message.reply_text(
-            "👋 ¡Hola! Ya está configurado y listo.\n\n" + INSTRUCCIONES_TEXTO,
-            parse_mode="Markdown",
+            BIENVENIDA_CONECTADO, parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📖 Ver todo lo que puedo hacer", callback_data="menu_help")
+            ]]),
         )
     elif activo:
         oauth_url = await _make_oauth_url(chat_id)

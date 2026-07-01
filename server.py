@@ -28,7 +28,7 @@ from mercadopago_service import (
     create_subscription_plan,
     verify_payment,
 )
-from texts import INSTRUCCIONES_TEXTO
+from texts import BIENVENIDA_CONECTADO
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
@@ -219,8 +219,11 @@ async def oauth_callback(request: Request):
                     f"https://api.telegram.org/bot{telegram_token}/sendMessage",
                     json={
                         "chat_id": chat_id,
-                        "text": "✅ ¡Cuenta de Google conectada!\n\n" + INSTRUCCIONES_TEXTO,
+                        "text": BIENVENIDA_CONECTADO,
                         "parse_mode": "Markdown",
+                        "reply_markup": {"inline_keyboard": [[
+                            {"text": "📖 Ver todo lo que puedo hacer", "callback_data": "menu_help"}
+                        ]]},
                     },
                     timeout=10,
                 )
