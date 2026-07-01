@@ -4,6 +4,17 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Evento + recordatorio en un mismo pedido (dejó de romperse).**
+  "agendá reunión y recordame una hora antes" solo creaba el evento; el recordatorio
+  nunca se hacía. Causa: `_tools_for` recortaba la lista a UNA sola tool (deuda del
+  modelo viejo), así el modelo no tenía `add_reminder` disponible. Cambios:
+  (1) `_tools_for` ahora SIEMPRE manda todas las tools (probado contra gpt-4.1: con hora
+  crea create_event + add_reminder correctamente; los tools son estáticos → se cachean).
+  (2) `_is_reminder_add_intent` pasa de forzar `add_reminder` a `"required"`, para que si
+  además hay evento pueda crear ambos. (3) Prompt: recordatorio relativo a un evento sin
+  hora → NO inventa ni agenda todo-el-día; pregunta a qué hora es (verificado: pregunta).
+  Nota: primer paso concreto de sacar el andamiaje de "forzar una sola tool".
+
 - **bot.py — "mostrame los gastos" prometía la lista pero no la mandaba.**
   El modelo respondía "al final verá la lista detallada..." pero nunca se mostraba
   (para gastos NO había render determinístico como en tareas; el modelo debía escribirla

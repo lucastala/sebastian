@@ -1990,18 +1990,11 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
 
 
 def _tools_for(tool_choice) -> list:
-    """Achica la lista de herramientas que mandamos según la intención:
-    - tool puntual forzada → mandamos SOLO esa (ahorra ~el 95% de tokens de tools).
-    - 'required' (crear eventos) → solo create_event (puede llamarla varias veces).
-    - 'auto' → todas (el modelo elige libremente).
-    Si por algo no encuentra la tool, manda todas (no rompe)."""
-    if isinstance(tool_choice, dict):
-        name = tool_choice["function"]["name"]
-        sub = [t for t in OPENAI_TOOLS if t["function"]["name"] == name]
-        return sub or OPENAI_TOOLS
-    if tool_choice == "required":
-        sub = [t for t in OPENAI_TOOLS if t["function"]["name"] == "create_event"]
-        return sub or OPENAI_TOOLS
+    """Siempre mandamos TODAS las tools. Antes recortábamos a una sola (para el modelo
+    viejo gpt-4o-mini y para ahorrar tokens), pero eso rompía los pedidos combinados
+    (ej. 'agendá X y recordame una hora antes': con solo create_event el modelo no podía
+    crear el recordatorio). gpt-4.1 elige bien con todas disponibles; el tool_choice
+    forzado sigue asegurando que ACTÚE. Los tools son estáticos → OpenAI los cachea."""
     return OPENAI_TOOLS
 
 
@@ -2072,7 +2065,13 @@ async def _call_openai(
             "('recordame X mañana a las 3', 'avisame a las 18 que...'), usá add_reminder con el "
             "texto, la fecha (YYYY-MM-DD) y la hora (HH:MM, 24h). Diferencia con tareas: si NO hay "
             "hora, es una tarea (add_task); si hay hora para avisar, es un recordatorio. "
-            "Para verlos usá get_reminders y para cancelarlos cancel_reminder por número."
+            "Para verlos usá get_reminders y para cancelarlos cancel_reminder por número. "
+            "RECORDATORIO RELATIVO A UN EVENTO ('agendá la reunión y recordame una hora antes', "
+            "'avisame 10 min antes'): si el evento TIENE hora, calculá la hora del aviso restando "
+            "ese rato y creá AMBOS (create_event + add_reminder). Si el evento NO tiene hora, es "
+            "IMPOSIBLE calcular el aviso: NO llames NINGUNA herramienta, NO inventes una hora, NO "
+            "agendes nada; respondé ÚNICAMENTE preguntando a qué hora es el evento (ej. '¿A qué "
+            "hora es la reunión? Así le pongo el aviso una hora antes.')."
             "\n\nREGLA PARA AGREGAR TAREAS (MUY IMPORTANTE): "
             "Cuando el usuario pida agregar/anotar/sumar/recordar algo que tiene que hacer, "
             "o exprese un pendiente sin hora de calendario (ej. 'comprar pan', 'llamar al médico', "
@@ -2180,7 +2179,9 @@ async def _call_openai(
     elif _is_reminder_query_intent(text):
         tool_choice = {"type": "function", "function": {"name": "get_reminders"}}
     elif _is_reminder_add_intent(text):
-        tool_choice = {"type": "function", "function": {"name": "add_reminder"}}
+        # "required" (no forzar SOLO add_reminder) para que si además hay un evento
+        # ('agendá X y recordame una hora antes') el modelo pueda crear ambos.
+        tool_choice = "required"
     elif _is_task_add_intent(text):
         tool_choice = {"type": "function", "function": {"name": "add_task"}}
     elif _is_event_create_intent(text):
