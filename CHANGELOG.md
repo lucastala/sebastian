@@ -4,6 +4,14 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — "mostrame los gastos" prometía la lista pero no la mandaba.**
+  El modelo respondía "al final verá la lista detallada..." pero nunca se mostraba
+  (para gastos NO había render determinístico como en tareas; el modelo debía escribirla
+  y a veces no lo hacía, contagiado de la regla "no escribas la lista de tareas"). Fix:
+  render determinístico `_format_gastos_lista` (resumen por categoría + detalle + total),
+  rama `get_expenses` en `_run_tool_calls` que lo pone como direct_reply, y prompt
+  ajustado ("la lista la muestra el sistema, no la escribas vos").
+
 - **bot.py — "mostrame la lista del súper" mostraba las TAREAS.**
   En `_route_text`, el handler de lista de tareas (`_is_task_list_request`) corre antes
   que el del súper, y "la lista del super" contiene "la lista" → ganaba tareas y hacía

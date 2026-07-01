@@ -1965,6 +1965,14 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                 texto = func_args.get("texto", "").strip()
                 cuando = result.get("cuando", "")
                 extra_confirmations.append(f"⏰ Le aviso {cuando}: {texto}")
+        elif func_name == "get_expenses":
+            result = await _execute_tool(func_name, func_args, user)
+            messages.append({
+                "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
+            # La lista la arma el CÓDIGO (no el modelo) para que SIEMPRE se muestre.
+            direct_reply = _format_gastos_lista(result)
         else:
             result = await _execute_tool(func_name, func_args, user)
             messages.append({
@@ -2086,8 +2094,9 @@ async def _call_openai(
             "\n\nREGLA PARA GASTOS: "
             "Si el usuario dice que YA gastó/pagó/compró algo (verbo en pasado, con un monto), "
             "registralo con add_expense e inferí la categoría, y guardá una descripción breve. "
-            "Si pide ver o listar sus gastos, usá get_expenses y mostralos enumerados con su número, "
-            "descripción y monto. Para editar el monto de un gasto usá update_expense_monto y para "
+            "Si pide ver o listar sus gastos (o cuánto gastó), usá get_expenses; la lista y el total "
+            "los muestra el SISTEMA solo, NO los escribas vos ni digas 'al final verá la lista'. "
+            "Para editar el monto de un gasto usá update_expense_monto y para "
             "borrarlo delete_expense, identificándolo por su número en la lista mostrada (pasá los "
             "mismos filtros de categoría/fechas). "
             "OJO: 'pagar el monotributo' o 'tengo que pagar X' es una TAREA futura, no un gasto. "
@@ -2499,6 +2508,30 @@ def _format_categoria_gastos(cat: str, data: dict) -> str:
         dia = _fmt_dia(str(g.get("fecha", "")))
         suffix = f" ({dia})" if dia else ""
         lines.append(f"{g['n']}. {desc} — {_fmt_money(g.get('monto'))}{suffix}")
+    lines.append(f"\n*Total:* {_fmt_money(data.get('total', 0))}")
+    return "\n".join(lines)
+
+
+def _format_gastos_lista(data: dict) -> str:
+    """Render determinístico del listado de gastos (resumen por categoría + detalle).
+    Lo arma el CÓDIGO, no el modelo, para que 'mostrame los gastos' SIEMPRE muestre la
+    lista real y no una promesa vacía ('al final verá la lista...')."""
+    gastos = data.get("gastos", [])
+    if not gastos:
+        return "🧾 No tiene gastos registrados en ese período."
+    lines = ["🧾 *Sus gastos:*\n"]
+    for g in gastos:
+        desc = g.get("descripcion") or "(sin descripción)"
+        dia = _fmt_dia(str(g.get("fecha", "")))
+        suffix = f" · {dia}" if dia else ""
+        emoji = CATEGORIA_EMOJI.get(str(g.get("categoria", "")), "")
+        lines.append(f"{g['n']}. {desc} — {_fmt_money(g.get('monto'))} {emoji}{suffix}")
+    por_cat = data.get("por_categoria", {})
+    if len(por_cat) > 1:
+        lines.append("\n*Por categoría:*")
+        for cat, monto in sorted(por_cat.items(), key=lambda x: x[1], reverse=True):
+            emoji = CATEGORIA_EMOJI.get(cat, "")
+            lines.append(f"• {emoji} {cat}: {_fmt_money(monto)}")
     lines.append(f"\n*Total:* {_fmt_money(data.get('total', 0))}")
     return "\n".join(lines)
 
