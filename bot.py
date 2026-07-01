@@ -108,8 +108,9 @@ async def _openai_chat(**kwargs):
             await asyncio.sleep(1.0 * (intento + 1))
     raise last_err
 
-# Chat/vision model — change here to swap models everywhere
-CHAT_MODEL = "gpt-4.1-mini"
+# Chat/vision model — change here (o con la env CHAT_MODEL) para cambiarlo en todo lado.
+# Si algo sale caro o raro, se puede volver a "gpt-4.1-mini" desde Render sin re-deploy.
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4.1")
 
 # Max chained tool rounds per message (search→update, etc.) before forcing a reply
 MAX_TOOL_ROUNDS = 5
@@ -330,6 +331,36 @@ def _is_event_create_intent(text: str) -> bool:
         return True
     # "poné/agregá/anotá una reunión/turno/cita ..." → new event
     return any(n in t for n in _EVENT_NOUNS) and any(v in t for v in _EVENT_NOUN_CREATE_VERBS)
+
+
+_DATE_REF_WORDS = (
+    "hoy", "mañana", "manana", "pasado", "ayer", "anoche",
+    "lunes", "martes", "miércoles", "miercoles", "jueves", "viernes",
+    "sábado", "sabado", "domingo",
+    "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+    "septiembre", "setiembre", "octubre", "noviembre", "diciembre",
+    "finde", "fin de semana", "feriado", "semana que viene", "mes que viene",
+    "próximo", "proximo", "próxima", "proxima", "que viene",
+)
+
+
+def _text_has_date_ref(text: str) -> bool:
+    """True si el mensaje menciona ALGÚN día/fecha (relativo, día de semana,
+    mes, número de día tipo 'el 15', o formato 15/07). Sirve para no inventar
+    la fecha de un evento cuando el usuario no dijo cuándo."""
+    t = text.lower()
+    if any(re.search(rf"\b{re.escape(w)}\b", t) for w in _DATE_REF_WORDS):
+        return True
+    # "el 15", "para el 3", "el 15 de julio" — número de día del mes
+    if re.search(r"\bel\s+\d{1,2}\b", t):
+        return True
+    # formatos de fecha 15/07, 15-07, 2026-07-15
+    if re.search(r"\b\d{1,2}[/-]\d{1,2}\b", t) or re.search(r"\b\d{4}-\d{2}-\d{2}\b", t):
+        return True
+    # "en 3 días", "dentro de una semana"
+    if re.search(r"\ben\s+\d+\s+d[ií]as?\b", t) or "dentro de" in t:
+        return True
+    return False
 
 
 def _is_expense_query_intent(text: str) -> bool:
@@ -699,6 +730,25 @@ OPENAI_TOOLS = [
                             "Duración en minutos (opcional). Usala cuando el usuario da una "
                             "duración, ej. 'reunión de 2 horas' → 120, 'media hora' → 30. "
                             "Si no se da ni hora_fin ni duracion_min, dura 1 hora."
+                        ),
+                    },
+                    "repetir": {
+                        "type": "string",
+                        "enum": ["diario", "semanal", "mensual", "anual"],
+                        "description": (
+                            "SOLO si el evento se REPITE ('todos los días', 'cada semana', "
+                            "'todos los lunes', 'todos los meses', 'cada año'). Google crea la "
+                            "serie completa con UN solo evento recurrente: NUNCA llames create_event "
+                            "muchas veces para repetir. Si no se repite, omitilo."
+                        ),
+                    },
+                    "hasta": {
+                        "type": "string",
+                        "description": (
+                            "Fecha de fin de la repetición en YYYY-MM-DD (opcional). Usala con "
+                            "'repetir' cuando el usuario da un límite ('hasta fin de mes', 'del 1 "
+                            "al 31 de julio', 'por 2 semanas'). Es el ÚLTIMO día en que ocurre. "
+                            "Si no da fin, omitila (se repite indefinidamente)."
                         ),
                     },
                 },
@@ -1339,6 +1389,14 @@ def _format_event_confirmation(ev: dict) -> str:
         base = _format_fecha(inicio[:10])
         cuando = f"{base} · {h1} a {h2}" if h2 else f"{base} · {h1}"
     txt = f"✅ *Agendado: {nombre}*\n📅 {cuando}"
+    repetir = ev.get("repetir")
+    if repetir:
+        cada = {"diario": "todos los días", "semanal": "cada semana",
+                "mensual": "todos los meses", "anual": "todos los años"}.get(repetir, "se repite")
+        linea = f"🔁 {cada}"
+        if ev.get("hasta"):
+            linea += f" hasta el {_format_fecha(ev['hasta'])}"
+        txt += f"\n{linea}"
     if link:
         txt += f"\n🔗 [Ver en Google Calendar]({link})"
     return txt
@@ -1445,6 +1503,7 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         return await create_event(
             user, func_args["nombre"], func_args["fecha"], func_args.get("hora"),
             func_args.get("hora_fin"), func_args.get("duracion_min"),
+            func_args.get("repetir"), func_args.get("hasta"),
         )
     if func_name == "get_pending_tasks":
         tasks = await get_pending_tasks(user)
@@ -1650,6 +1709,15 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
     show_tasks = False
     direct_reply: str | None = None
     event_confirmations: list[str] = []  # una por cada evento creado en esta tanda
+    extra_confirmations: list[str] = []  # otras acciones de la misma tanda (recordatorios, etc.)
+
+    # Texto original del usuario (último mensaje 'user') — para decidir si mencionó
+    # una fecha o el modelo la inventó.
+    orig_text = next(
+        (m["content"] for m in reversed(messages)
+         if m.get("role") == "user" and isinstance(m.get("content"), str)),
+        "",
+    )
 
     for tc in msg.tool_calls:
         func_name = tc.function.name
@@ -1658,6 +1726,11 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
 
         if func_name in ("update_task", "delete_task"):
             show_tasks = True
+
+        # Evento recurrente ('todos los días', 'cada semana') sin día de inicio:
+        # arranca HOY. No tiene sentido preguntar "¿qué día?" para algo que se repite.
+        if func_name == "create_event" and func_args.get("repetir") and not func_args.get("fecha"):
+            func_args["fecha"] = datetime.now(ARGENTINA_TZ).strftime("%Y-%m-%d")
 
         if func_name == "add_task":
             tarea = func_args.get("tarea", "")
@@ -1727,13 +1800,19 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                     "name": func_name,
                     "content": f"Evento encontrado: {event_name}. Mostrando botón de confirmación.",
                 })
-        elif func_name == "create_event" and not func_args.get("fecha"):
-            # Falta el día → preguntamos en vez de inventar una fecha.
+        elif func_name == "create_event" and not func_args.get("repetir") and (
+            not func_args.get("fecha") or not _text_has_date_ref(orig_text)
+        ):
+            # Falta el día (o el modelo lo inventó sin que el usuario lo dijera) →
+            # preguntamos en vez de agendar cualquier cosa. (Los recurrentes no entran
+            # acá: arrancan hoy, ya se les puso la fecha arriba.)
             _pending_event_date[chat_id] = {
                 "nombre": func_args["nombre"],
                 "hora": func_args.get("hora"),
                 "hora_fin": func_args.get("hora_fin"),
                 "duracion_min": func_args.get("duracion_min"),
+                "repetir": func_args.get("repetir"),
+                "hasta": func_args.get("hasta"),
             }
             direct_reply = (
                 f"📅 ¿Para qué día agendo «{func_args['nombre']}»? "
@@ -1807,6 +1886,18 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                     pending_keyboard = _build_cuotas_menu(eid)
                 else:
                     direct_reply = f"✅ Gasto registrado: *{monto_txt}* ({func_args['categoria']}) — {medio}"
+        elif func_name == "add_reminder":
+            result = await _execute_tool(func_name, func_args, user)
+            messages.append({
+                "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
+            # Confirmación determinística para que SIEMPRE se avise, aunque en la
+            # misma tanda haya un evento (que si no la pisaría).
+            if isinstance(result, dict) and result.get("ok"):
+                texto = func_args.get("texto", "").strip()
+                cuando = result.get("cuando", "")
+                extra_confirmations.append(f"⏰ Le aviso {cuando}: {texto}")
         else:
             result = await _execute_tool(func_name, func_args, user)
             messages.append({
@@ -1816,8 +1907,9 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                 "content": json.dumps(result, ensure_ascii=False, default=str),
             })
 
-    if event_confirmations:
-        direct_reply = "\n\n".join(event_confirmations)
+    all_confirmations = event_confirmations + extra_confirmations
+    if all_confirmations:
+        direct_reply = "\n\n".join(all_confirmations)
 
     return pending_keyboard, show_tasks, direct_reply
 
@@ -1877,6 +1969,12 @@ async def _call_openai(
             "(interpolá los casos intermedios, ej. 'tarde-noche'≈19:00). "
             "Si NO hay NINGUNA referencia horaria (ni hora ni franja), NO pases 'hora': se agenda "
             "como evento de todo el día. "
+            "EVENTOS QUE SE REPITEN: si el usuario pide algo periódico ('todos los días', 'cada "
+            "semana', 'todos los lunes', 'todos los meses', 'del 1 al 31'), llamá create_event UNA "
+            "SOLA VEZ con 'repetir' (diario/semanal/mensual/anual) y, si da un límite, 'hasta' "
+            "(YYYY-MM-DD del último día). 'fecha' es el PRIMER día de la serie. NUNCA agendes día "
+            "por día ni llames create_event muchas veces, y NUNCA digas que agendaste una serie si "
+            "no usaste 'repetir'. "
             "No escribas vos la confirmación del evento: el sistema la arma con la hora real y el link."
             "\n\nLA PALABRA EXPLÍCITA MANDA: si el usuario dice 'tarea' es una TAREA (add_task) "
             "aunque use 'agendame'; si dice 'recordatorio' es un RECORDATORIO (add_reminder); "
@@ -2911,12 +3009,28 @@ async def _route_text(
             await message.reply_text("Listo, no agendé nada.")
             return
         # Reconstruimos el pedido con el día que acaba de dar y lo mandamos al flujo normal.
+        # Si respondió un número pelado ("15"), lo normalizamos a "el 15" para que
+        # el detector de fecha lo reconozca y no vuelva a preguntar en loop.
+        dia = text.strip()
+        if re.fullmatch(r"\d{1,2}", dia):
+            dia = f"el {dia}"
+        # Red de seguridad anti-loop: si la respuesta no trae ninguna fecha reconocible
+        # y no es recurrente, asumimos que arranca HOY (mejor que preguntar sin fin).
+        if not _text_has_date_ref(dia) and not pend.get("repetir"):
+            dia = f"hoy {dia}".strip()
         sintetico = f"agendá {pend['nombre']}"
         if pend.get("hora"):
             sintetico += f" a las {pend['hora']}"
             if pend.get("hora_fin"):
                 sintetico += f" hasta las {pend['hora_fin']}"
-        sintetico += f" {text}"
+        sintetico += f" {dia}"
+        # Preservamos la repetición si la había (ej. "tomar hierro todos los días").
+        rep_txt = {"diario": "todos los días", "semanal": "cada semana",
+                   "mensual": "todos los meses", "anual": "todos los años"}.get(pend.get("repetir"))
+        if rep_txt:
+            sintetico += f", {rep_txt}"
+            if pend.get("hasta"):
+                sintetico += f" hasta el {pend['hasta']}"
         await _route_text(update, context, user, sintetico)
         return
 

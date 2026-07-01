@@ -214,6 +214,45 @@ async def delete_event(user: dict, event_id: str) -> bool:
     return await loop.run_in_executor(None, _delete)
 
 
+_FREQ_MAP = {
+    "diario": "DAILY", "diaria": "DAILY", "dia": "DAILY", "dias": "DAILY",
+    "semanal": "WEEKLY", "semana": "WEEKLY",
+    "mensual": "MONTHLY", "mes": "MONTHLY",
+    "anual": "YEARLY", "año": "YEARLY", "anio": "YEARLY",
+}
+
+
+def _build_rrule(repetir: Optional[str], fecha: str, hasta: Optional[str]) -> Optional[str]:
+    """Arma la regla de recurrencia (RRULE) para un evento repetido.
+    'repetir' = diario/semanal/mensual/anual. 'hasta' = YYYY-MM-DD (opcional).
+    Usa COUNT (no UNTIL) para evitar líos de zona horaria en el corte."""
+    if not repetir:
+        return None
+    freq = _FREQ_MAP.get(repetir.strip().lower())
+    if not freq:
+        return None
+    if not hasta:
+        return f"RRULE:FREQ={freq}"  # sin fin: un único evento recurrente (barato)
+    try:
+        start = datetime.strptime(fecha, "%Y-%m-%d").date()
+        end = datetime.strptime(hasta, "%Y-%m-%d").date()
+    except ValueError:
+        return f"RRULE:FREQ={freq}"
+    span = (end - start).days
+    if span < 0:
+        span = 0
+    if freq == "DAILY":
+        count = span + 1
+    elif freq == "WEEKLY":
+        count = span // 7 + 1
+    elif freq == "MONTHLY":
+        count = (end.year - start.year) * 12 + (end.month - start.month) + 1
+    else:  # YEARLY
+        count = (end.year - start.year) + 1
+    count = max(1, count)
+    return f"RRULE:FREQ={freq};COUNT={count}"
+
+
 async def create_event(
     user: dict,
     nombre: str,
@@ -221,9 +260,12 @@ async def create_event(
     hora: Optional[str] = None,
     hora_fin: Optional[str] = None,
     duracion_min: Optional[int] = None,
+    repetir: Optional[str] = None,
+    hasta: Optional[str] = None,
 ) -> dict:
     creds = await refresh_user_credentials(user)
     loop = asyncio.get_running_loop()
+    rrule = _build_rrule(repetir, fecha, hasta)
 
     def _create():
         service = build("calendar", "v3", credentials=creds)
@@ -257,6 +299,9 @@ async def create_event(
                 "end": {"date": fecha},
             }
 
+        if rrule:
+            body["recurrence"] = [rrule]
+
         event = service.events().insert(calendarId="primary", body=body).execute()
         start_val = event["start"].get("dateTime", event["start"].get("date", ""))
         end_val = event["end"].get("dateTime", event["end"].get("date", ""))
@@ -267,6 +312,8 @@ async def create_event(
             "inicio": start_val,
             "fin": end_val,
             "all_day": "dateTime" not in event.get("start", {}),
+            "repetir": (repetir.strip().lower() if (repetir and rrule) else None),
+            "hasta": (hasta if (repetir and rrule and hasta) else None),
         }
 
     return await loop.run_in_executor(None, _create)
