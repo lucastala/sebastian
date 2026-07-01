@@ -4,6 +4,15 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Error handler global + mensajes largos (crash al pedir gastos).**
+  Al pedir la lista de gastos el bot tiró excepción no atrapada ("No error handlers
+  are registered"). Causa probable: la lista superaba el límite de 4096 chars de
+  Telegram y fallaban AMBOS intentos de envío (Markdown y plano). Fixes:
+  (1) `error_handler` global registrado con `app.add_error_handler`: loguea el traceback
+  COMPLETO y avisa al usuario en vez de morir en silencio. (2) `_reply_long`: parte los
+  mensajes largos en trozos <4096 por líneas y cae a texto plano si el Markdown falla;
+  reemplaza el bloque de envío del handler de texto.
+
 - **bot.py — Evento + recordatorio en un mismo pedido (dejó de romperse).**
   "agendá reunión y recordame una hora antes" solo creaba el evento; el recordatorio
   nunca se hacía. Causa: `_tools_for` recortaba la lista a UNA sola tool (deuda del

@@ -3082,6 +3082,31 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 # ── Message routing ───────────────────────────────────────────────────────────
 
+async def _reply_long(message, text: str, reply_markup=None) -> None:
+    """Envía respetando el límite de 4096 chars de Telegram y el Markdown frágil:
+    parte en trozos por líneas si es largo, e intenta Markdown; si un trozo tiene
+    caracteres que rompen el formato, lo manda en texto plano. El teclado va en el
+    último trozo."""
+    LIMIT = 4000
+    if len(text) <= LIMIT:
+        chunks = [text]
+    else:
+        chunks, cur = [], ""
+        for line in text.split("\n"):
+            if len(cur) + len(line) + 1 > LIMIT and cur:
+                chunks.append(cur.rstrip("\n"))
+                cur = ""
+            cur += line + "\n"
+        if cur.strip():
+            chunks.append(cur.rstrip("\n"))
+    for i, ch in enumerate(chunks):
+        kb = reply_markup if i == len(chunks) - 1 else None
+        try:
+            await message.reply_text(ch, parse_mode="Markdown", reply_markup=kb)
+        except Exception:
+            await message.reply_text(ch, reply_markup=kb)  # sin Markdown (chars especiales)
+
+
 async def _route_text(
     update: Update, context: ContextTypes.DEFAULT_TYPE, user: dict, text: str
 ) -> None:
@@ -3324,15 +3349,8 @@ async def _route_text(
     # When the full list rides along and the action didn't attach its own
     # keyboard, add the manual button so it shows with every complete list.
     footer_kb = _tasks_help_kb() if (footer and keyboard is None) else None
-    try:
-        await message.reply_text(
-            full_text, parse_mode="Markdown", reply_markup=keyboard or footer_kb
-        )
-    except Exception:
-        # Reply may contain special chars — send plain, then footer with Markdown
-        await message.reply_text(reply, reply_markup=keyboard)
-        if footer:
-            await message.reply_text(footer, parse_mode="Markdown", reply_markup=footer_kb)
+    # _reply_long parte mensajes largos (>4096) y cae a texto plano si el Markdown falla.
+    await _reply_long(message, full_text, reply_markup=keyboard or footer_kb)
 
 
 # ── Create event conflict confirmation callback ───────────────────────────────
@@ -3776,6 +3794,20 @@ async def _post_shutdown(application: Application) -> None:
         logger.info("Scheduler stopped")
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manejador global: cualquier excepción no atrapada en un handler cae acá.
+    Loguea el traceback COMPLETO (para poder diagnosticar) y le avisa al usuario en
+    vez de fallar en silencio."""
+    logger.error("Excepción no atrapada en un handler:", exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "⚠️ Uy, tuve un problema con eso. Probá de nuevo en un momento."
+            )
+    except Exception:
+        pass  # si ni siquiera podemos avisar, no empeoremos las cosas
+
+
 def main() -> None:
     token = os.getenv("TELEGRAM_TOKEN")
     if not token:
@@ -3802,6 +3834,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_pago_medio, pattern=r"^payexp_"))
     app.add_handler(CallbackQueryHandler(handle_cuotas_count, pattern=r"^cuotacnt_"))
     app.add_handler(CallbackQueryHandler(handle_menu, pattern=r"^menu_"))
+    app.add_error_handler(error_handler)
 
     logger.info("Bot starting — polling for updates")
     app.run_polling(allowed_updates=["message", "callback_query"])
