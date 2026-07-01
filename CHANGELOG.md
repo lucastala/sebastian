@@ -4,16 +4,17 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
-- **bot.py — Guardrail de recurrencia determinístico.**
-  Caso "tomar hierro todos los días, 7am y 18:30, todo julio/agosto/septiembre" → el
-  modelo creaba UN evento único de hoy, sin recurrencia (se olvidaba de 'repetir').
-  Ahora, si el mensaje dice explícitamente una recurrencia ("todos los días", "cada
-  semana", "todos los lunes", "todos los meses"), el CÓDIGO fuerza 'repetir' aunque el
-  modelo no lo haya puesto (`_recurrence_from_text`), y deduce 'hasta' de los meses
-  nombrados (`_hasta_from_text`: "julio agosto septiembre" → 2026-09-30). Además prompt
-  reforzado con ejemplo de varias tomas/día + rango de meses, y nota para mantener la
-  recurrencia en los follow-ups ("falta el de la mañana"). Limitación conocida: un
-  follow-up SIN palabras de recurrencia depende del modelo (el guardrail no lo agarra).
+- **bot.py — REVERTIDO el guardrail de recurrencia por aliases (era el enfoque equivocado).**
+  Se probó empíricamente contra gpt-4.1 (scratchpad/exp_recurrencia*.py): con el prompt
+  actual el modelo YA interpreta bien recurrencias, incluso frases novedosas que ninguna
+  lista cubriría ("cada mañanita de acá a fin de año" → diario hasta 31/12; "tres veces
+  por día durante agosto" → 3 eventos diarios; "el primero de cada mes" → gasto fijo).
+  Por eso se eliminaron `_recurrence_from_text` / `_hasta_from_text` (parche frágil por
+  frases). Lo que resuelve el caso es el PROMPT que enseña el CONCEPTO (repetir/hasta +
+  1 ejemplo trabajado), que generaliza. Se conserva el ejemplo en el prompt.
+  Nota estratégica: la arquitectura de `_is_*_intent` + `tool_choice` forzado + toolset
+  recortado es deuda del modelo viejo (gpt-4o-mini); gpt-4.1 anda bien con auto+todas las
+  tools. Candidato a simplificar más adelante (no urgente, no rompe nada hoy).
 
 - **bot.py — Borrado de evento con match FLEXIBLE por palabras clave.**
   El usuario parafrasea el título ("borrame el cable 19 por 2,5" para "Averiguar
