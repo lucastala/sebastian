@@ -80,6 +80,21 @@ async def update_task_fecha(user: dict, task_id: str, fecha: str) -> bool:
         return False
 
 
+async def delete_task_by_id(user: dict, task_id: int) -> str | None:
+    """Marca una tarea como completada por su id de Supabase (botones 🗑️ de la
+    lista). El id no cambia aunque la lista se reordene, a diferencia de la
+    posición. Devuelve el nombre, o None si ya no estaba pendiente."""
+    res = get_supabase().table("tareas").select("*").eq("id", task_id).eq(
+        "chat_id", user["chat_id"]
+    ).eq("estado", "pendiente").execute()
+    if not res.data:
+        return None
+    get_supabase().table("tareas").update({"estado": "completada"}).eq(
+        "id", task_id
+    ).execute()
+    return res.data[0].get("tarea", "")
+
+
 async def delete_task_by_position(user: dict, position: int) -> str | None:
     rows = _sort_pending(await get_pending_tasks(user), _es_cercana(user))
     if position < 1 or position > len(rows):

@@ -4,6 +4,26 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py + data_store.py — Tareas con botones 🗑️ para eliminar (mismo patrón que los
+  listados).**
+  Antes borrar tareas era solo con ".2" o por lenguaje natural; ahora TODA lista de
+  tareas (menú, ".tareas", ".N", pedido natural, footer tras acciones, foto) sale con un
+  botón `🗑️ n. tarea` por tarea que la elimina al tocarlo y re-renderiza el mismo mensaje
+  (como `menu_lidel_` en listados). Detalles:
+  - `data_store.delete_task_by_id`: borra por **id de Supabase**, no por posición — el
+    botón sigue apuntando a la MISMA tarea aunque la lista se reordene entre que se
+    mostró y se tocó. Tap repetido sobre una ya borrada avisa "ya no estaba" y no rompe.
+  - `build_tasks_view(user, menu)` reemplaza a `build_tasks_footer` en los lugares con
+    botones (un solo fetch: texto y teclado siempre coinciden). El callback lleva el
+    contexto (`tdel_{id}_{m|c}`) para re-renderizar con "Volver al menú" solo en el menú.
+  - `build_tasks_footer` queda SOLO para cuando la lista acompaña una acción con teclado
+    propio (ej. calendario de fecha límite): ahí va texto sin botones con el hint ".2".
+  - Se eliminó `_tasks_help_kb` (el botón "Manual de uso" ahora va al pie del teclado de
+    tareas). El borrado por ".2" y por lenguaje natural siguen funcionando igual.
+  Verificado con experimento local con mocks (exp_tasks_botones.py, 5/5): orden
+  texto/botones idéntico en ambos órdenes de usuario, borrado por id, contexto menú
+  preservado tras borrar, tap repetido, lista vacía.
+
 - **bot.py — Combo sin hora: el modelo agendaba igual (a veces inventando 09:00) y la
   pregunta '¿a qué hora?' se perdía.**
   Retest post-fix anterior: "agendame reunion el martes... y poneme un recordatorio una

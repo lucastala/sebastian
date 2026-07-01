@@ -64,6 +64,7 @@ from data_store import (
     delete_expense,
     delete_list,
     export_user_data,
+    delete_task_by_id,
     delete_task_by_position,
     set_expense_medio,
     get_balance,
@@ -1500,7 +1501,65 @@ def _build_calendar_keyboard(task_id: str, year: int, month: int) -> InlineKeybo
 
 # ── Tasks footer ──────────────────────────────────────────────────────────────
 
+def _format_tasks_text(ordered: list[dict], con_botones: bool) -> str:
+    if not ordered:
+        return (
+            "No tiene tareas pendientes.\n\n"
+            "✏️ Para agregar una, escriba un punto y la tarea. Ej: \".comprar pan\""
+        )
+    lines = ["📋 *Tareas pendientes:*"]
+    for i, task in enumerate(ordered, 1):
+        fecha = str(task.get("fecha", "")).strip()
+        if fecha:
+            lines.append(f"{i}. *{_format_fecha(fecha)}* — {task['tarea']}")
+        else:
+            lines.append(f"{i}. {task['tarea']}")
+    if con_botones:
+        lines.append(
+            "\n✏️ *Agregar:* un punto y la tarea → \".comprar pan\"\n"
+            "🗑️ *Borrar:* toque la tarea en los botones de abajo"
+        )
+    else:
+        lines.append(
+            "\n✏️ *Agregar:* un punto y la tarea → \".comprar pan\"\n"
+            "🗑️ *Borrar:* un punto y el número → \".2\""
+        )
+    return "\n".join(lines)
+
+
+def _build_tasks_keyboard(ordered: list[dict], menu: bool = False) -> InlineKeyboardMarkup:
+    """Mismo patrón que los listados (_build_list_menu): un botón 🗑️ por tarea que
+    la elimina al tocarlo. El callback lleva el id de Supabase (no la posición),
+    así el botón sigue apuntando a la MISMA tarea aunque la lista se reordene."""
+    ctx = "m" if menu else "c"  # para re-renderizar con el teclado del contexto correcto
+    rows = [
+        [InlineKeyboardButton(f"🗑️ {i}. {t.get('tarea', '')}", callback_data=f"tdel_{t['id']}_{ctx}")]
+        for i, t in enumerate(ordered, 1)
+    ]
+    rows.append([InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help_tareas")])
+    if menu:
+        rows.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def build_tasks_view(user: dict, menu: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    """Lista de tareas + teclado con botones 🗑️ para eliminar cada una.
+    Un solo fetch para que texto y botones muestren exactamente lo mismo."""
+    try:
+        tasks = await get_pending_tasks(user)
+    except Exception as e:
+        logger.error(
+            f"Error fetching tasks for user {user.get('chat_id')}: {type(e).__name__}: {e}"
+        )
+        return ("⚠️ No pude cargar las tareas. Intente de nuevo en un momento.",
+                _build_tasks_keyboard([], menu))
+    ordered = _sort_tasks(tasks, _orden_cercana(user))
+    return _format_tasks_text(ordered, con_botones=True), _build_tasks_keyboard(ordered, menu)
+
+
 async def build_tasks_footer(user: dict) -> str:
+    """Solo el texto de la lista (sin botones) — para cuando la lista acompaña a una
+    acción que ya trae su propio teclado (ej. el calendario de fecha límite)."""
     try:
         tasks = await get_pending_tasks(user)
     except Exception as e:
@@ -1508,25 +1567,7 @@ async def build_tasks_footer(user: dict) -> str:
             f"Error fetching tasks for user {user.get('chat_id')}: {type(e).__name__}: {e}"
         )
         return "⚠️ No pude cargar las tareas. Intente de nuevo en un momento."
-
-    if not tasks:
-        return (
-            "No tiene tareas pendientes.\n\n"
-            "✏️ Para agregar una, escriba un punto y la tarea. Ej: \".comprar pan\""
-        )
-
-    lines = ["📋 *Tareas pendientes:*"]
-    for i, task in enumerate(_sort_tasks(tasks, _orden_cercana(user)), 1):
-        fecha = str(task.get("fecha", "")).strip()
-        if fecha:
-            lines.append(f"{i}. *{_format_fecha(fecha)}* — {task['tarea']}")
-        else:
-            lines.append(f"{i}. {task['tarea']}")
-    lines.append(
-        "\n✏️ *Agregar:* un punto y la tarea → \".comprar pan\"\n"
-        "🗑️ *Borrar:* un punto y el número → \".2\""
-    )
-    return "\n".join(lines)
+    return _format_tasks_text(_sort_tasks(tasks, _orden_cercana(user)), con_botones=False)
 
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
@@ -2407,10 +2448,8 @@ async def handle_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         header = "✅ Sin fecha límite\n\n"
 
-    footer = await build_tasks_footer(user)
-    await query.edit_message_text(
-        header + footer, parse_mode="Markdown", reply_markup=_tasks_help_kb()
-    )
+    text, kb = await build_tasks_view(user)
+    await query.edit_message_text(header + text, parse_mode="Markdown", reply_markup=kb)
 
 
 # ── Menú interactivo ──────────────────────────────────────────────────────────
@@ -2472,14 +2511,6 @@ def _build_gastos_cat_menu() -> InlineKeyboardMarkup:
 
 def _menu_back(target: str, label: str = "⬅️ Volver al menú") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=target)]])
-
-
-def _tasks_help_kb() -> InlineKeyboardMarkup:
-    """Botón al pie de la lista de tareas — por si Sebastian no entiende algo,
-    que el usuario pueda abrir el manual y no se frustre."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help_tareas")
-    ]])
 
 
 def _resumen_label(user: dict) -> str:
@@ -2832,14 +2863,8 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if data == "menu_tareas":
-        footer = await build_tasks_footer(user)
-        await query.edit_message_text(
-            footer, parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help_tareas")],
-                [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")],
-            ]),
-        )
+        text, kb = await build_tasks_view(user, menu=True)
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
         return
 
     if data == "menu_fijos":
@@ -3342,8 +3367,8 @@ async def _route_text(
         content = text[1:].strip()
 
         if content.lower() in ("tareas", "lista"):
-            footer = await build_tasks_footer(user)
-            await message.reply_text(footer, parse_mode="Markdown", reply_markup=_tasks_help_kb())
+            text_t, kb = await build_tasks_view(user)
+            await message.reply_text(text_t, parse_mode="Markdown", reply_markup=kb)
             return
 
         if re.match(r"^\d+$", content):
@@ -3354,9 +3379,9 @@ async def _route_text(
                 if deleted_name is not None
                 else f"⚠️ No encontré la tarea n.° {pos}.\n\n"
             )
-            footer = await build_tasks_footer(user)
+            text_t, kb = await build_tasks_view(user)
             await message.reply_text(
-                prefix + footer, parse_mode="Markdown", reply_markup=_tasks_help_kb()
+                prefix + text_t, parse_mode="Markdown", reply_markup=kb
             )
 
         elif content:
@@ -3375,11 +3400,11 @@ async def _route_text(
                     "Complete primero la configuración de Google."
                 )
         else:
-            footer = await build_tasks_footer(user)
+            text_t, kb = await build_tasks_view(user)
             await message.reply_text(
                 "⚠️ Para agregar, un punto y la tarea (\".comprar pan\"). "
-                "Para borrar, un punto y el número (\".2\").\n\n" + footer,
-                parse_mode="Markdown", reply_markup=_tasks_help_kb(),
+                "Para borrar, un punto y el número (\".2\").\n\n" + text_t,
+                parse_mode="Markdown", reply_markup=kb,
             )
         return
 
@@ -3394,8 +3419,8 @@ async def _route_text(
 
     # Pedido explícito de la lista de tareas
     if _is_task_list_request(text):
-        footer = await build_tasks_footer(user)
-        await message.reply_text(footer, parse_mode="Markdown", reply_markup=_tasks_help_kb())
+        text_t, kb = await build_tasks_view(user)
+        await message.reply_text(text_t, parse_mode="Markdown", reply_markup=kb)
         return
 
     # Pedido de la lista del súper → mostrarla con botones (incluye "➕ Agregar")
@@ -3431,14 +3456,18 @@ async def _route_text(
         logger.error(f"OpenAI error for user {user['chat_id']}: {e}")
         reply, keyboard = "⚠️ Tuve un error procesando su mensaje. Intente de nuevo.", None
 
-    # The tasks list is only appended when the list actually changed.
-    footer = await build_tasks_footer(user) if show_tasks else None
-    full_text = reply + ("\n\n" + footer if footer else "")
-    # When the full list rides along and the action didn't attach its own
-    # keyboard, add the manual button so it shows with every complete list.
-    footer_kb = _tasks_help_kb() if (footer and keyboard is None) else None
+    # The tasks list is only appended when the list actually changed. If the
+    # action didn't attach its own keyboard, the list rides with its 🗑️ buttons;
+    # if it did (ej. el calendario de fecha), va solo el texto para no pisarlo.
+    if show_tasks and keyboard is None:
+        text_t, kb = await build_tasks_view(user)
+        full_text, reply_kb = reply + "\n\n" + text_t, kb
+    else:
+        footer = await build_tasks_footer(user) if show_tasks else None
+        full_text = reply + ("\n\n" + footer if footer else "")
+        reply_kb = keyboard
     # _reply_long parte mensajes largos (>4096) y cae a texto plano si el Markdown falla.
-    await _reply_long(message, full_text, reply_markup=keyboard or footer_kb)
+    await _reply_long(message, full_text, reply_markup=reply_kb)
 
 
 # ── Create event conflict confirmation callback ───────────────────────────────
@@ -3527,6 +3556,39 @@ async def handle_cuotas_count(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     else:
         await query.edit_message_text("⚠️ No pude registrar las cuotas. Probá de nuevo.")
+
+
+# ── Delete task button callback (🗑️ en la lista de tareas) ──────────────────
+
+async def handle_task_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Botón 🗑️ de la lista de tareas: elimina por id y re-renderiza el mismo
+    mensaje, igual que los ítems de los listados (menu_lidel_)."""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    user = await get_user(chat_id)
+    if not user:
+        await query.answer()
+        return
+
+    parts = query.data.split("_")  # tdel_{id}_{m|c}
+    task_id = int(parts[1])
+    menu = len(parts) > 2 and parts[2] == "m"
+
+    nombre = await delete_task_by_id(user, task_id)
+    if nombre:
+        await query.answer(f"✅ Eliminada: {nombre}"[:190])
+    else:
+        await query.answer("⚠️ Esa tarea ya no estaba en la lista.")
+
+    text, kb = await build_tasks_view(user, menu=menu)
+    try:
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        # Markdown roto por el texto de una tarea, o mensaje idéntico (tap repetido)
+        try:
+            await query.edit_message_text(text, reply_markup=kb)
+        except Exception:
+            pass
 
 
 # ── Delete event confirmation callback ───────────────────────────────────────
@@ -3643,10 +3705,10 @@ async def _photo_tareas(message, user: dict, data: dict) -> None:
         await message.reply_text("📷 Vi una nota pero no pude identificar tareas. ¿Me las dice?")
         return
     lines = "\n".join(f"• {a}" for a in added)
-    footer = await build_tasks_footer(user)
+    text_t, kb = await build_tasks_view(user)
     await message.reply_text(
-        f"✅ Agregué {len(added)} tarea(s) desde la foto:\n{lines}\n\n{footer}",
-        parse_mode="Markdown", reply_markup=_tasks_help_kb(),
+        f"✅ Agregué {len(added)} tarea(s) desde la foto:\n{lines}\n\n{text_t}",
+        parse_mode="Markdown", reply_markup=kb,
     )
 
 
@@ -3918,6 +3980,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
     app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
     app.add_handler(CallbackQueryHandler(handle_delete_event, pattern=r"^delEvent"))
+    app.add_handler(CallbackQueryHandler(handle_task_delete, pattern=r"^tdel_"))
     app.add_handler(CallbackQueryHandler(handle_create_conflict, pattern=r"^createConflict_"))
     app.add_handler(CallbackQueryHandler(handle_pago_medio, pattern=r"^payexp_"))
     app.add_handler(CallbackQueryHandler(handle_cuotas_count, pattern=r"^cuotacnt_"))
