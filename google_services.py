@@ -208,7 +208,17 @@ async def delete_event(user: dict, event_id: str) -> bool:
 
     def _delete():
         service = build("calendar", "v3", credentials=creds)
-        service.events().delete(calendarId="primary", eventId=event_id).execute()
+        target_id = event_id
+        # Si el id es una INSTANCIA de una serie recurrente, borramos el evento
+        # maestro (toda la serie) en vez de un solo día. Así "eliminá esos eventos"
+        # borra la serie completa, como espera el usuario.
+        try:
+            ev = service.events().get(calendarId="primary", eventId=event_id).execute()
+            if ev.get("recurringEventId"):
+                target_id = ev["recurringEventId"]
+        except Exception:
+            pass
+        service.events().delete(calendarId="primary", eventId=target_id).execute()
         return True
 
     return await loop.run_in_executor(None, _delete)

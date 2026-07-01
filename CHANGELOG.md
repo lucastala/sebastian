@@ -4,6 +4,13 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **google_services.py — Borrar una serie recurrente borra TODA la serie.**
+  Con `singleEvents=True` el borrado recibía el id de una INSTANCIA y Google sacaba
+  solo ese día. Ahora `delete_event` hace un `get` del evento: si tiene
+  `recurringEventId` (es instancia de una serie), borra el evento MAESTRO (toda la
+  serie). Trade-off: por ahora no se puede borrar una sola ocurrencia de una serie
+  (se borra entera), que es lo que el usuario espera al decir "eliminá esos eventos".
+
 - **bot.py — Hotfix: `'ChatCompletionMessage' object has no attribute 'get'`.**
   El detector de texto original (`orig_text`) hacía `m.get(...)` sobre `messages`,
   pero esa lista mezcla dicts con objetos `ChatCompletionMessage` (el mensaje del
