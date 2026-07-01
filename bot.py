@@ -175,6 +175,9 @@ _tratamiento_mode: set[int] = set()
 # Chats esperando que escriban una cantidad de cuotas → maps chat_id al id del gasto
 _cuota_count_mode: dict[int, int] = {}
 
+# Chats a los que les falta la FECHA de un evento → guarda los datos del evento pendiente
+_pending_event_date: dict[int, dict] = {}
+
 # Chats that just tapped "Nuevo listado" and we're waiting for them to type the name
 _awaiting_list_name: set[int] = set()
 
@@ -665,7 +668,11 @@ OPENAI_TOOLS = [
                     "nombre": {"type": "string", "description": "Título del evento"},
                     "fecha": {
                         "type": "string",
-                        "description": "Fecha en formato YYYY-MM-DD",
+                        "description": (
+                            "Fecha en formato YYYY-MM-DD. Si el usuario da un día (mañana, el "
+                            "jueves, el 15), calculala y pasala. Si NO menciona NINGÚN día ni fecha, "
+                            "OMITÍ este campo (no inventes una fecha): el sistema le preguntará el día."
+                        ),
                     },
                     "hora": {
                         "type": "string",
@@ -695,7 +702,7 @@ OPENAI_TOOLS = [
                         ),
                     },
                 },
-                "required": ["nombre", "fecha"],
+                "required": ["nombre"],
             },
         },
     },
@@ -1720,6 +1727,22 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                     "name": func_name,
                     "content": f"Evento encontrado: {event_name}. Mostrando botón de confirmación.",
                 })
+        elif func_name == "create_event" and not func_args.get("fecha"):
+            # Falta el día → preguntamos en vez de inventar una fecha.
+            _pending_event_date[chat_id] = {
+                "nombre": func_args["nombre"],
+                "hora": func_args.get("hora"),
+                "hora_fin": func_args.get("hora_fin"),
+                "duracion_min": func_args.get("duracion_min"),
+            }
+            direct_reply = (
+                f"📅 ¿Para qué día agendo «{func_args['nombre']}»? "
+                "(ej: mañana, el jueves, el 15)"
+            )
+            messages.append({
+                "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                "content": "Falta la fecha; se le preguntó al usuario qué día.",
+            })
         elif func_name == "create_event" and func_args.get("hora"):
             nombre = func_args["nombre"]
             fecha = func_args["fecha"]
@@ -1844,6 +1867,8 @@ async def _call_openai(
             "no 14:50; '11:50 pm' → 23:50). "
             "Si el usuario CORRIGE la hora o fecha de algo que acabás de agendar (ej. 'no, a las "
             "11:50', 'era el jueves'), usá update_event para MODIFICAR ese evento; NO crees uno nuevo. "
+            "Si el usuario NO menciona NINGÚN día ni fecha, llamá create_event SIN el campo 'fecha' "
+            "(NO inventes una fecha): el sistema le va a preguntar el día. "
             "Pasá la hora de inicio en 'hora' (HH:MM, 24h) copiando exactamente lo que dijo el "
             "usuario. Si da un rango ('de 19 a 20', 'de 9 a 10:30'), pasá también 'hora_fin'. "
             "Si da una duración ('reunión de 2 horas', 'media hora'), pasá 'duracion_min' en minutos. "
@@ -2876,6 +2901,23 @@ async def _route_text(
                 InlineKeyboardButton("✅ Terminar", callback_data="menu_listdone")
             ]]),
         )
+        return
+
+    # Falta el día de un evento → el próximo mensaje es la fecha
+    if chat_id in _pending_event_date:
+        pend = _pending_event_date.pop(chat_id)
+        low = text.strip().lower()
+        if low in ("cancelar", "cancela", ".", "no", "dejá", "deja", "olvidalo", "olvidá", "nada"):
+            await message.reply_text("Listo, no agendé nada.")
+            return
+        # Reconstruimos el pedido con el día que acaba de dar y lo mandamos al flujo normal.
+        sintetico = f"agendá {pend['nombre']}"
+        if pend.get("hora"):
+            sintetico += f" a las {pend['hora']}"
+            if pend.get("hora_fin"):
+                sintetico += f" hasta las {pend['hora_fin']}"
+        sintetico += f" {text}"
+        await _route_text(update, context, user, sintetico)
         return
 
     # "¿En cuántas cuotas?" (opción otra) — el próximo mensaje es el número
