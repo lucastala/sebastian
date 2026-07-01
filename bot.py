@@ -320,6 +320,9 @@ def _is_event_create_intent(text: str) -> bool:
     # Never grab edits/deletes of an existing event.
     if _is_event_edit_intent(text) or _is_event_delete_intent(text):
         return False
+    # Si nombra explícitamente otra cosa (tarea/recordatorio), NO es un evento.
+    if re.search(r"\btareas?\b", t) or "recordatorio" in t:
+        return False
     if any(v in t for v in _EVENT_CREATE_VERBS):
         return True
     # "poné/agregá/anotá una reunión/turno/cita ..." → new event
@@ -364,8 +367,22 @@ def _is_cuota_add_intent(text: str) -> bool:
     return bool(re.search(r"\d", t))           # "en 12 cuotas de 50000"
 
 
+# Verbos de agregar/agendar (imperativos) que, junto a la palabra "tarea", indican
+# una TAREA aunque se use "agendame". No incluye verbos de borrar/editar/consultar.
+_TASK_SCHEDULE_VERBS = (
+    "agendame", "agendá", "agéndame", "agendalo", "agendala", "agendar",
+    "agendámelo", "agendamelo", "agregame", "agregá", "agrega", "anotá", "anota",
+    "anotame", "sumá", "sumame", "poné", "pone", "ponme", "añadí", "añade", "añadime",
+    "cargá", "carga", "meté", "mete", "recordame", "recordá", "acordate",
+)
+
+
 def _is_task_add_intent(text: str) -> bool:
     t = text.lower()
+    # La palabra explícita "tarea"/"tareas" + un verbo de agregar/agendar MANDA:
+    # es una tarea aunque diga "agendame" o tenga hora. La palabra explícita gana.
+    if re.search(r"\btareas?\b", t) and any(v in t for v in _TASK_SCHEDULE_VERBS):
+        return True
     # If it names an event or has a specific time, it's a calendar event, not a task
     if any(e in t for e in _EVENT_WORDS):
         return False
@@ -508,7 +525,9 @@ def _has_time(text: str) -> bool:
 
 def _is_reminder_add_intent(text: str) -> bool:
     t = text.lower()
-    return any(v in t for v in _REMINDER_VERBS) and _has_time(t)
+    # Verbo de recordar/avisar, o la palabra explícita "recordatorio", + una hora.
+    tiene = any(v in t for v in _REMINDER_VERBS) or "recordatorio" in t
+    return tiene and _has_time(t)
 
 
 def _is_reminder_query_intent(text: str) -> bool:
@@ -1826,6 +1845,9 @@ async def _call_openai(
             "Si NO hay NINGUNA referencia horaria (ni hora ni franja), NO pases 'hora': se agenda "
             "como evento de todo el día. "
             "No escribas vos la confirmación del evento: el sistema la arma con la hora real y el link."
+            "\n\nLA PALABRA EXPLÍCITA MANDA: si el usuario dice 'tarea' es una TAREA (add_task) "
+            "aunque use 'agendame'; si dice 'recordatorio' es un RECORDATORIO (add_reminder); "
+            "'agendame/agendá' SIN esas palabras es un EVENTO (create_event)."
             "\n\nREGLA OBLIGATORIA PARA ELIMINAR EVENTOS: "
             "Cuando el usuario quiera eliminar un evento, llamá INMEDIATAMENTE delete_event "
             "con el nombre del evento y la fecha. NO busques el evento antes, NO pidas confirmación con texto. "
