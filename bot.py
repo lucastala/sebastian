@@ -365,6 +365,53 @@ def _text_has_date_ref(text: str) -> bool:
     return False
 
 
+_MESES_NUM = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+
+
+def _recurrence_from_text(text: str) -> str | None:
+    """Si el usuario dijo EXPLÍCITAMENTE una recurrencia, devuelve su frecuencia
+    (diario/semanal/mensual/anual). Sirve para FORZAR la repetición aunque el modelo
+    se la haya olvidado (que fue lo que pasó con las 'dos tomas diarias')."""
+    t = unicodedata.normalize("NFKD", text.lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    if any(p in t for p in (
+        "todos los dias", "todas los dias", "cada dia", "diariamente", "a diario",
+        "todas las mananas", "todas las noches", "todas las tardes", "dia por medio",
+    )):
+        return "diario"
+    if any(p in t for p in ("todas las semanas", "cada semana", "semanalmente")) or \
+            re.search(r"todos los (lunes|martes|miercoles|jueves|viernes|sabados?|domingos?)", t):
+        return "semanal"
+    if any(p in t for p in ("todos los meses", "cada mes", "mensualmente")):
+        return "mensual"
+    if any(p in t for p in ("todos los anos", "cada ano", "anualmente")):
+        return "anual"
+    return None
+
+
+def _hasta_from_text(text: str, fecha_inicio: str | None) -> str | None:
+    """Intenta deducir la fecha de fin de una recurrencia a partir de los meses
+    nombrados ('julio, agosto y septiembre' → último día de septiembre). Best-effort:
+    si no hay meses, devuelve None (la serie queda sin fin)."""
+    t = unicodedata.normalize("NFKD", text.lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    meses = [num for name, num in _MESES_NUM.items() if re.search(rf"\b{name}\b", t)]
+    if not meses:
+        return None
+    try:
+        start = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        start = datetime.now(ARGENTINA_TZ).date()
+    target = max(meses)
+    year = start.year if target >= start.month else start.year + 1
+    last_day = cal_module.monthrange(year, target)[1]
+    return f"{year:04d}-{target:02d}-{last_day:02d}"
+
+
 def _is_expense_query_intent(text: str) -> bool:
     t = text.lower()
     return any(p in t for p in _EXPENSE_QUERY_PHRASES)
@@ -1767,6 +1814,18 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
         if func_name in ("update_task", "delete_task"):
             show_tasks = True
 
+        # Guardrail de recurrencia: si el usuario dijo EXPLÍCITAMENTE "todos los días",
+        # "cada semana", etc. y el modelo NO puso 'repetir', lo forzamos. Así "todos los
+        # días" siempre repite, no depende de que el modelo se acuerde.
+        if func_name == "create_event" and not func_args.get("repetir"):
+            rec = _recurrence_from_text(orig_text)
+            if rec:
+                func_args["repetir"] = rec
+                if not func_args.get("hasta"):
+                    h = _hasta_from_text(orig_text, func_args.get("fecha"))
+                    if h:
+                        func_args["hasta"] = h
+
         # Anti-duplicado: con tool_choice="required" el modelo a veces repite la MISMA
         # llamada create_event dos veces en una tanda → se creaba el evento duplicado.
         if func_name == "create_event":
@@ -2034,11 +2093,15 @@ async def _call_openai(
             "Si NO hay NINGUNA referencia horaria (ni hora ni franja), NO pases 'hora': se agenda "
             "como evento de todo el día. "
             "EVENTOS QUE SE REPITEN: si el usuario pide algo periódico ('todos los días', 'cada "
-            "semana', 'todos los lunes', 'todos los meses', 'del 1 al 31'), llamá create_event UNA "
-            "SOLA VEZ con 'repetir' (diario/semanal/mensual/anual) y, si da un límite, 'hasta' "
-            "(YYYY-MM-DD del último día). 'fecha' es el PRIMER día de la serie. NUNCA agendes día "
-            "por día ni llames create_event muchas veces, y NUNCA digas que agendaste una serie si "
-            "no usaste 'repetir'. "
+            "semana', 'todos los lunes', 'todos los meses', 'del 1 al 31'), SIEMPRE pasá 'repetir' "
+            "(diario/semanal/mensual/anual) y, si da un límite, 'hasta' (YYYY-MM-DD del último día). "
+            "'fecha' es el PRIMER día de la serie. NUNCA agendes día por día. "
+            "Si el pedido tiene VARIAS ocurrencias por día (ej. 'tomar hierro 7am y 18:30 todos los "
+            "días de julio, agosto y septiembre'), hacé UNA create_event POR CADA HORARIO, cada una "
+            "con su 'hora' y AMBAS con repetir='diario' y hasta='2026-09-30'. "
+            "Si el usuario venía armando una rutina repetida y agrega otro horario después ('falta "
+            "el de la mañana a las 7'), ese nuevo evento TAMBIÉN va con 'repetir' (mantené la misma "
+            "recurrencia y 'hasta' que los anteriores). "
             "No escribas vos la confirmación del evento: el sistema la arma con la hora real y el link."
             "\n\nLA PALABRA EXPLÍCITA MANDA: si el usuario dice 'tarea' es una TAREA (add_task) "
             "aunque use 'agendame'; si dice 'recordatorio' es un RECORDATORIO (add_reminder); "

@@ -4,6 +4,17 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Guardrail de recurrencia determinístico.**
+  Caso "tomar hierro todos los días, 7am y 18:30, todo julio/agosto/septiembre" → el
+  modelo creaba UN evento único de hoy, sin recurrencia (se olvidaba de 'repetir').
+  Ahora, si el mensaje dice explícitamente una recurrencia ("todos los días", "cada
+  semana", "todos los lunes", "todos los meses"), el CÓDIGO fuerza 'repetir' aunque el
+  modelo no lo haya puesto (`_recurrence_from_text`), y deduce 'hasta' de los meses
+  nombrados (`_hasta_from_text`: "julio agosto septiembre" → 2026-09-30). Además prompt
+  reforzado con ejemplo de varias tomas/día + rango de meses, y nota para mantener la
+  recurrencia en los follow-ups ("falta el de la mañana"). Limitación conocida: un
+  follow-up SIN palabras de recurrencia depende del modelo (el guardrail no lo agarra).
+
 - **bot.py — Borrado de evento con match FLEXIBLE por palabras clave.**
   El usuario parafrasea el título ("borrame el cable 19 por 2,5" para "Averiguar
   precio de mangueras de 19 por 2,5 milímetros con cable Sur") y el borrado, que
