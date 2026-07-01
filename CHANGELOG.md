@@ -4,6 +4,20 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Borrado distingue evento vs recordatorio + listados deterministas.**
+  Síntomas: (a) "qué eventos tengo el martes" a veces prometía y no listaba; (b)
+  "eliminá las dos cosas" borraba solo el evento; (c) borrar un recordatorio decía
+  "Evento eliminado". Causas: listados escritos por el modelo (poco fiables) y borrado
+  forzado a delete_event. Fixes:
+  - Render determinístico de recordatorios (`_format_recordatorios_lista`) y eventos
+    (`_format_eventos_lista`); ramas get_reminders / get_today_events / get_events_by_date
+    en `_run_tool_calls` los ponen como direct_reply.
+  - `_is_event_delete_intent` pasa de forzar `delete_event` a `"required"`: con todas las
+    tools el modelo elige delete_event y/o cancel_reminder según el contexto. Prompt con
+    regla "evento vs recordatorio al borrar" + "borrá ambos si piden las dos cosas".
+    Probado (exp_delete.py): "eliminá el de reunión" tras ver recordatorios → cancel_reminder;
+    "eliminá las dos cosas" → delete_event + cancel_reminder.
+
 - **bot.py — Error handler global + mensajes largos (crash al pedir gastos).**
   Al pedir la lista de gastos el bot tiró excepción no atrapada ("No error handlers
   are registered"). Causa probable: la lista superaba el límite de 4096 chars de

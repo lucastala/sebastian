@@ -1973,6 +1973,20 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
             })
             # La lista la arma el CÓDIGO (no el modelo) para que SIEMPRE se muestre.
             direct_reply = _format_gastos_lista(result)
+        elif func_name == "get_reminders":
+            result = await _execute_tool(func_name, func_args, user)
+            messages.append({
+                "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
+            direct_reply = _format_recordatorios_lista(result)
+        elif func_name in ("get_today_events", "get_events_by_date"):
+            result = await _execute_tool(func_name, func_args, user)
+            messages.append({
+                "tool_call_id": tc.id, "role": "tool", "name": func_name,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
+            direct_reply = _format_eventos_lista(result if isinstance(result, list) else [])
         else:
             result = await _execute_tool(func_name, func_args, user)
             messages.append({
@@ -2055,6 +2069,13 @@ async def _call_openai(
             "Cuando el usuario quiera eliminar un evento, llamá INMEDIATAMENTE delete_event "
             "con el nombre del evento y la fecha. NO busques el evento antes, NO pidas confirmación con texto. "
             "El sistema se encarga de buscar el evento y mostrar el botón de confirmación."
+            "\n\nEVENTO vs RECORDATORIO AL BORRAR (IMPORTANTE): "
+            "'eliminá X' puede ser un EVENTO o un RECORDATORIO. Fijate el CONTEXTO: si lo último que "
+            "se mostró/creó fue un recordatorio (o el usuario dice 'recordatorio'/'aviso'), usá "
+            "cancel_reminder por su número (si no sabés el número, llamá get_reminders primero). Si "
+            "es un evento, usá delete_event. Si el usuario pide borrar 'las dos cosas' / 'todo' de "
+            "algo que es evento Y tiene un recordatorio asociado, borrá AMBOS: delete_event Y "
+            "cancel_reminder en la misma respuesta."
             "\n\nREGLA PARA EDITAR EVENTOS: "
             "Cuando el usuario quiera editar un evento (cambiar hora, nombre o fecha), llamá "
             "update_event DIRECTAMENTE, pasando el nombre del evento en 'query' (y 'fecha' si la "
@@ -2202,7 +2223,10 @@ async def _call_openai(
     elif _is_expense_edit_intent(text):
         tool_choice = {"type": "function", "function": {"name": "update_expense_monto"}}
     elif _is_event_delete_intent(text):
-        tool_choice = {"type": "function", "function": {"name": "delete_event"}}
+        # No forzamos delete_event: "eliminá X" puede ser un evento O un recordatorio
+        # (o ambos, "borrá las dos cosas"). Con "required" + todas las tools el modelo
+        # elige delete_event y/o cancel_reminder según el contexto.
+        tool_choice = "required"
     elif _is_task_edit_intent(text):
         tool_choice = {"type": "function", "function": {"name": "update_task"}}
     elif _is_event_edit_intent(text):
@@ -2534,6 +2558,30 @@ def _format_gastos_lista(data: dict) -> str:
             emoji = CATEGORIA_EMOJI.get(cat, "")
             lines.append(f"• {emoji} {cat}: {_fmt_money(monto)}")
     lines.append(f"\n*Total:* {_fmt_money(data.get('total', 0))}")
+    return "\n".join(lines)
+
+
+def _format_recordatorios_lista(rems: list[dict]) -> str:
+    """Render determinístico de los recordatorios (lo arma el código, no el modelo,
+    para que SIEMPRE se muestren)."""
+    if not rems:
+        return "⏰ No tiene recordatorios pendientes."
+    lines = ["⏰ *Sus recordatorios:*\n"]
+    for r in rems:
+        lines.append(f"{r['n']}. {r.get('texto', '')} — {r.get('cuando', '')}")
+    lines.append("\nPara cancelar uno, dígame el número (ej. \"cancelá el recordatorio 1\").")
+    return "\n".join(lines)
+
+
+def _format_eventos_lista(events: list[dict]) -> str:
+    """Render determinístico de una lista de eventos de un día."""
+    if not events:
+        return "📅 No tiene eventos agendados ese día."
+    lines = ["📅 *Sus eventos:*\n"]
+    for e in events:
+        inicio = str(e.get("inicio", ""))
+        hora = inicio[11:16] if ("T" in inicio and len(inicio) >= 16) else "todo el día"
+        lines.append(f"• {hora} — {e.get('nombre', '(sin título)')}")
     return "\n".join(lines)
 
 
