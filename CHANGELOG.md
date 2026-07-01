@@ -4,6 +4,11 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Hotfix: `'ChatCompletionMessage' object has no attribute 'get'`.**
+  El detector de texto original (`orig_text`) hacía `m.get(...)` sobre `messages`,
+  pero esa lista mezcla dicts con objetos `ChatCompletionMessage` (el mensaje del
+  assistant). Se reemplazó por acceso seguro (isinstance dict → .get, si no → getattr).
+
 - **bot.py — Fix loop "¿para qué día?" en eventos recurrentes.**
   "agendame todos los días a las 4 tomar el hierro" → "¿para qué día?" → "todos los
   días del año" → "¿para qué día?" (loop infinito, porque "todos los días del año" no

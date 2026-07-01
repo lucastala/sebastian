@@ -1712,12 +1712,15 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
     extra_confirmations: list[str] = []  # otras acciones de la misma tanda (recordatorios, etc.)
 
     # Texto original del usuario (último mensaje 'user') — para decidir si mencionó
-    # una fecha o el modelo la inventó.
-    orig_text = next(
-        (m["content"] for m in reversed(messages)
-         if m.get("role") == "user" and isinstance(m.get("content"), str)),
-        "",
-    )
+    # una fecha o el modelo la inventó. OJO: `messages` mezcla dicts con objetos
+    # ChatCompletionMessage (el del assistant), así que accedemos de forma segura.
+    orig_text = ""
+    for m in reversed(messages):
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+        if role == "user" and isinstance(content, str):
+            orig_text = content
+            break
 
     for tc in msg.tool_calls:
         func_name = tc.function.name
