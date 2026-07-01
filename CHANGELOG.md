@@ -4,6 +4,31 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Combo evento+recordatorio en dos turnos: el guard de fecha descartaba el evento
+  y el loop cortaba los pedidos encadenados.**
+  Síntoma real (transcript): "agendame el martes reunion de prueba y un recordatorio una
+  hora antes" → "¿a qué hora?" → "a las 15" → solo se creaba el recordatorio; el evento
+  NUNCA. Diagnóstico con experimentos reales (gpt-4.1 y minis: 17/17 emiten AMBAS tool
+  calls — el modelo NO era el problema). Tres bugs de código encadenados:
+  1. **Guard anti-"fecha inventada" miraba solo el ÚLTIMO mensaje** ("a las 15", sin
+     fecha) en vez de toda la conversación ("el martes" venía de 2 mensajes antes) →
+     descartaba el evento y preguntaba "¿para qué día?". Fix: `user_gave_date_ref`
+     revisa TODOS los mensajes user de la ventana.
+  2. **Las confirmaciones pisaban preguntas/listas de la misma tanda** (final de
+     `_run_tool_calls`): la pregunta "¿para qué día agendo?" era reemplazada por
+     "⏰ Le aviso..." → el usuario nunca la veía y el evento moría en `_pending_event_date`.
+     Fix: se concatena TODO (confirmaciones + pregunta/lista).
+  3. **Early-return del loop multi-ronda**: si una tool armaba direct_reply, se cortaba
+     el turno → cualquier combo secuencial moría ("mostrame los recordatorios y cancelá
+     el de X": mostraba la lista y el cancel nunca corría — verificado 4/4). Fix: los
+     direct_reply se ACUMULAN entre rondas y el loop sigue hasta que el modelo no pida
+     más tools; si la última ronda actuó sin respuesta de código, se suma el texto del
+     modelo. `seen_event_sigs` ahora se comparte entre rondas (anti-duplicado).
+     Costo: +1 llamada a OpenAI por turno con acción.
+  Además: regla nueva en el prompt ("PEDIDOS CON VARIAS ACCIONES: emití TODAS las tool
+  calls juntas; nunca completes solo una parte"). Verificado end-to-end con el loop real
+  y tools mockeadas (exp_e2e_loop_arreglado.py): combo paralelo y secuencial OK.
+
 - **bot.py — Borrado distingue evento vs recordatorio + listados deterministas.**
   Síntomas: (a) "qué eventos tengo el martes" a veces prometía y no listaba; (b)
   "eliminá las dos cosas" borraba solo el evento; (c) borrar un recordatorio decía

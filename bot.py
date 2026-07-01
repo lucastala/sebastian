@@ -1739,28 +1739,34 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
     return {"error": f"Función desconocida: {func_name}"}
 
 
-async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
+async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int, seen_event_sigs: set | None = None):
     """Execute one assistant message's tool calls and append their results to
     `messages`. Returns (pending_keyboard, show_tasks, direct_reply).
     direct_reply, si no es None, es un texto final armado por el código (ej. la
-    confirmación de un evento) que debe usarse tal cual, sin que el modelo lo reformule."""
+    confirmación de un evento) que debe usarse tal cual, sin que el modelo lo reformule.
+    seen_event_sigs lo comparte el caller entre RONDAS para que un create_event
+    repetido en una ronda posterior no duplique el evento."""
     pending_keyboard: InlineKeyboardMarkup | None = None
     show_tasks = False
     direct_reply: str | None = None
     event_confirmations: list[str] = []  # una por cada evento creado en esta tanda
     extra_confirmations: list[str] = []  # otras acciones de la misma tanda (recordatorios, etc.)
-    seen_event_sigs: set = set()  # para descartar create_event duplicados en la misma tanda
+    if seen_event_sigs is None:
+        seen_event_sigs = set()  # para descartar create_event duplicados
 
-    # Texto original del usuario (último mensaje 'user') — para decidir si mencionó
-    # una fecha o el modelo la inventó. OJO: `messages` mezcla dicts con objetos
-    # ChatCompletionMessage (el del assistant), así que accedemos de forma segura.
-    orig_text = ""
-    for m in reversed(messages):
+    # ¿El usuario mencionó una fecha en la CONVERSACIÓN, o el modelo la inventó?
+    # OJO: hay que mirar TODOS sus mensajes recientes, no solo el último — la fecha
+    # suele venir de un turno anterior (U: 'agendame el martes X y recordame antes'
+    # → A: '¿a qué hora?' → U: 'a las 15'): mirar solo 'a las 15' hacía descartar
+    # la fecha correcta y preguntar '¿para qué día?' de nuevo (bug real 2026-07-01).
+    # `messages` mezcla dicts con objetos ChatCompletionMessage → acceso seguro.
+    user_texts = []
+    for m in messages:
         role = m.get("role") if isinstance(m, dict) else getattr(m, "role", None)
         content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
         if role == "user" and isinstance(content, str):
-            orig_text = content
-            break
+            user_texts.append(content)
+    user_gave_date_ref = any(_text_has_date_ref(t) for t in user_texts)
 
     for tc in msg.tool_calls:
         func_name = tc.function.name
@@ -1868,7 +1874,7 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
                     "content": f"Evento encontrado: {event_name}. Mostrando botón de confirmación.",
                 })
         elif func_name == "create_event" and not func_args.get("repetir") and (
-            not func_args.get("fecha") or not _text_has_date_ref(orig_text)
+            not func_args.get("fecha") or not user_gave_date_ref
         ):
             # Falta el día (o el modelo lo inventó sin que el usuario lo dijera) →
             # preguntamos en vez de agendar cualquier cosa. (Los recurrentes no entran
@@ -1998,7 +2004,11 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int):
 
     all_confirmations = event_confirmations + extra_confirmations
     if all_confirmations:
-        direct_reply = "\n\n".join(all_confirmations)
+        # NO pisar lo que otra tool de la misma tanda haya armado (ej. create_event
+        # sin fecha pregunta '¿para qué día agendo?' y un add_reminder de la misma
+        # tanda confirmaba y la pisaba → el evento quedaba en el limbo): va TODO.
+        partes = all_confirmations + ([direct_reply] if direct_reply else [])
+        direct_reply = "\n\n".join(partes)
 
     return pending_keyboard, show_tasks, direct_reply
 
@@ -2035,6 +2045,11 @@ async def _call_openai(
             "El usuario puede escribirte de vos, pero respondé siempre con este trato formal. "
             "Cuando el usuario pide una hora en punto ('a las 4', 'a las 10'), usá HH:00. "
             "Si da minutos exactos ('19:30', 'siete y media'), respetalos TAL CUAL: NUNCA redondees. "
+            "\n\nPEDIDOS CON VARIAS ACCIONES: si el usuario pide VARIAS cosas en un mensaje "
+            "(ej. 'agendá la reunión Y recordame una hora antes'), emití TODAS las tool calls "
+            "correspondientes JUNTAS en la misma respuesta. Si una acción depende del resultado "
+            "de otra (ej. necesitás ver la lista para saber un número), encadenala en la ronda "
+            "siguiente. NUNCA completes solo una parte del pedido y dejes el resto sin hacer. "
             "\n\nREGLA PARA CREAR EVENTOS (create_event): "
             "La hora es SIEMPRE hora LOCAL de Argentina. Pasala EXACTAMENTE como la dijo el "
             "usuario y NUNCA la conviertas a UTC ni le sumes/restes horas ('11:50 am' → 11:50, "
@@ -2256,26 +2271,29 @@ async def _call_openai(
 
     pending_keyboard: InlineKeyboardMarkup | None = None
     show_tasks = False  # only append the tasks list when the list actually changed
-    direct_reply: str | None = None
+    direct_replies: list[str] = []  # respuestas armadas por CÓDIGO, acumuladas ronda a ronda
+    last_round_had_direct = False
+    seen_event_sigs: set = set()  # anti-duplicado de create_event a través de TODAS las rondas
     rounds = 0
 
     # Multi-round tool loop: keep the tools available so the model can chain
     # actions in the same turn (e.g. search_event → update_event) instead of
     # promising to do something and never doing it.
+    # OJO: acá NO se corta aunque una tool arme la respuesta (direct_reply). Cortar
+    # rompía los combos secuenciales ('mostrame los recordatorios y cancelá el de X':
+    # get_reminders mostraba la lista, return, y el cancel NUNCA corría — verificado
+    # 4/4 con experimento real contra gpt-4.1, 2026-07-01). Las respuestas de código
+    # se ACUMULAN y el modelo conserva sus rondas para completar TODO el pedido.
     while msg.tool_calls and rounds < MAX_TOOL_ROUNDS:
         rounds += 1
         messages.append(msg)
-        pk, st, dr = await _run_tool_calls(msg, messages, user, chat_id)
+        pk, st, dr = await _run_tool_calls(msg, messages, user, chat_id, seen_event_sigs)
         if pk is not None:
             pending_keyboard = pk
         show_tasks = show_tasks or st
+        last_round_had_direct = dr is not None
         if dr is not None:
-            direct_reply = dr
-        # Si una tool armó la respuesta final (ej. confirmación de evento), la usamos
-        # tal cual y cortamos: el modelo no la reformula (no redondea ni inventa).
-        if direct_reply is not None:
-            _add_to_history(chat_id, text, direct_reply)
-            return direct_reply, pending_keyboard, show_tasks
+            direct_replies.append(dr)
         response = await _openai_chat(
             model=CHAT_MODEL,
             messages=messages,
@@ -2284,7 +2302,16 @@ async def _call_openai(
         )
         msg = response.choices[0].message
 
-    reply = msg.content or "Listo."
+    if direct_replies:
+        # Las respuestas del código van TAL CUAL (el modelo no las reformula: no
+        # redondea ni inventa). Si la ÚLTIMA ronda hizo acciones sin respuesta de
+        # código (ej. cancel_reminder después de mostrar la lista), sumamos el texto
+        # del modelo para que esa acción también quede confirmada.
+        reply = "\n\n".join(direct_replies)
+        if not last_round_had_direct and msg.content:
+            reply += f"\n\n{msg.content}"
+    else:
+        reply = msg.content or "Listo."
     _add_to_history(chat_id, text, reply)
     return reply, pending_keyboard, show_tasks
 
