@@ -102,3 +102,9 @@ CREATE TABLE IF NOT EXISTS public.cuotas (
 );
 
 ALTER TABLE public.cuotas ENABLE ROW LEVEL SECURITY;
+
+-- ── Tareas: prioridad con estrellas (2026-07-01) ─────────────────────────────
+-- 0 = sin estrellas (mínima), 5 = máxima. Reemplaza a la fecha límite: la lista
+-- se ordena por prioridad descendente. Correr y después recargar el schema cache.
+ALTER TABLE public.tareas ADD COLUMN IF NOT EXISTS prioridad INT NOT NULL DEFAULT 0;
+NOTIFY pgrst, 'reload schema';

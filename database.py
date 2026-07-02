@@ -126,18 +126,6 @@ async def wipe_user_account_extras(chat_id: int) -> None:
         logger.error(f"Error clearing Google tokens for {chat_id}: {e}")
 
 
-async def update_user_orden(chat_id: int, orden: str) -> bool:
-    """Orden de la lista de tareas: 'lejana' (default) o 'cercana'."""
-    try:
-        get_supabase().table("usuarios").update({"orden_tareas": orden}).eq(
-            "chat_id", chat_id
-        ).execute()
-        return True
-    except Exception as e:
-        logger.error(f"Error updating orden_tareas for {chat_id}: {e}")
-        return False
-
-
 async def update_user_tratamiento(chat_id: int, tratamiento: str | None) -> bool:
     """Cómo quiere la persona que la llamen (nombre/título), o None para trato neutro."""
     try:

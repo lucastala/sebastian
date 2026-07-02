@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import calendar as cal_module
 import csv
 import io
 import json
@@ -31,7 +30,6 @@ from database import (
     get_user,
     get_user_reminders,
     register_message,
-    update_user_orden,
     update_user_resumen,
     update_user_tratamiento,
     use_activation_code,
@@ -79,10 +77,10 @@ from data_store import (
     get_super_list,
     remove_list_items,
     remove_super_items,
+    set_task_priority,
     settle_debt,
     update_expense_monto,
     update_task,
-    update_task_fecha,
 )
 
 load_dotenv()
@@ -766,7 +764,10 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_pending_tasks",
-            "description": "Obtiene las tareas pendientes del usuario desde Google Sheets",
+            "description": (
+                "Obtiene las tareas pendientes del usuario. Cada una trae su número 'n' "
+                "(el que ve el usuario), el texto y su prioridad (0-5 estrellas)."
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -777,15 +778,19 @@ OPENAI_TOOLS = [
             "description": (
                 "Agrega una tarea pendiente a la lista del usuario. Usalo cuando el usuario pida "
                 "agregar/anotar/sumar una tarea o un pendiente en lenguaje natural. "
-                "Si menciona una fecha límite (mañana, el jueves, el 11, etc.), calculá la fecha exacta."
+                "Las tareas tienen prioridad de 0 a 5 estrellas (5 = máxima)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "tarea": {"type": "string", "description": "Texto de la tarea"},
-                    "fecha": {
-                        "type": "string",
-                        "description": "Fecha límite en formato YYYY-MM-DD (opcional)",
+                    "prioridad": {
+                        "type": "integer",
+                        "description": (
+                            "Prioridad 0-5 (5 = máxima). Pasala SOLO si el usuario la dijo "
+                            "('urgente'≈5, '3 estrellas', 'sin apuro'≈0). Si no la mencionó, "
+                            "OMITILA: el sistema se la pregunta con botones."
+                        ),
                     },
                 },
                 "required": ["tarea"],
@@ -883,7 +888,7 @@ OPENAI_TOOLS = [
             "name": "update_task",
             "description": (
                 "Edita una tarea pendiente por su número de posición en la lista. "
-                "Podés cambiar el nombre y/o la fecha. "
+                "Podés cambiar el nombre y/o la prioridad (0-5 estrellas). "
                 "Usá get_pending_tasks primero si necesitás saber el número de la tarea."
             ),
             "parameters": {
@@ -897,9 +902,9 @@ OPENAI_TOOLS = [
                         "type": "string",
                         "description": "Nuevo nombre de la tarea (opcional)",
                     },
-                    "nueva_fecha": {
-                        "type": "string",
-                        "description": "Nueva fecha en formato YYYY-MM-DD, o cadena vacía para quitar la fecha (opcional)",
+                    "nueva_prioridad": {
+                        "type": "integer",
+                        "description": "Nueva prioridad 0-5 (5 = máxima, 0 = sin estrellas) (opcional)",
                     },
                 },
                 "required": ["posicion"],
@@ -1442,100 +1447,64 @@ def _format_event_confirmation(ev: dict) -> str:
     return txt
 
 
-def _orden_cercana(user: dict) -> bool:
-    return str(user.get("orden_tareas") or "").lower() == "cercana"
+def _task_prioridad(task: dict) -> int:
+    try:
+        return max(0, min(5, int(task.get("prioridad") or 0)))
+    except (ValueError, TypeError):
+        return 0
 
 
-def _sort_tasks(tasks: list[dict], cercana: bool = False) -> list[dict]:
-    """cercana=False (default): sin fecha arriba, luego fechas de más lejana a más cercana.
-    cercana=True: fechas de más cercana a más lejana arriba, y las SIN fecha al final
-    (para que lo más urgente quede primero). Debe coincidir con el borrado."""
-    no_date = [t for t in tasks if not str(t.get("fecha", "")).strip()]
-    dated = sorted(
-        [t for t in tasks if str(t.get("fecha", "")).strip()],
-        key=lambda t: str(t["fecha"]),
-        reverse=not cercana,
-    )
-    return (dated + no_date) if cercana else (no_date + dated)
+def _stars(prioridad: int) -> str:
+    return "⭐" * max(0, min(5, prioridad))
 
 
-# ── Calendar keyboard ─────────────────────────────────────────────────────────
+def _sort_tasks(tasks: list[dict]) -> list[dict]:
+    """Más estrellas arriba; a igual prioridad, la más vieja primero (id ascendente).
+    Debe coincidir con data_store._sort_pending (el borrado por número)."""
+    return sorted(tasks, key=lambda t: (-_task_prioridad(t), int(t.get("id") or 0)))
 
-def _build_calendar_keyboard(task_id: str, year: int, month: int) -> InlineKeyboardMarkup:
-    MESES = ["", "Enero", "Feb", "Mar", "Abr", "May", "Jun",
-             "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-    prev_m = month - 1 if month > 1 else 12
-    prev_y = year if month > 1 else year - 1
-    next_m = month + 1 if month < 12 else 1
-    next_y = year if month < 12 else year + 1
 
-    rows = []
-    rows.append([
-        InlineKeyboardButton("◀", callback_data=f"calNav_{task_id}_{prev_y}_{prev_m:02d}"),
-        InlineKeyboardButton(f"{MESES[month]} {year}", callback_data="calIgnore"),
-        InlineKeyboardButton("▶", callback_data=f"calNav_{task_id}_{next_y}_{next_m:02d}"),
+# ── Priority keyboard (al agregar una tarea) ──────────────────────────────────
+
+def _build_priority_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    """6 botones para elegir la prioridad de una tarea recién agregada:
+    de sin estrellas (mínima) a ⭐⭐⭐⭐⭐ (máxima)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_stars(n), callback_data=f"tprio_{task_id}_{n}") for n in (1, 2, 3)],
+        [InlineKeyboardButton(_stars(n), callback_data=f"tprio_{task_id}_{n}") for n in (4, 5)],
+        [InlineKeyboardButton("Sin estrellas", callback_data=f"tprio_{task_id}_0")],
     ])
-    rows.append([
-        InlineKeyboardButton(d, callback_data="calIgnore")
-        for d in ["Lu", "Ma", "Mi", "Ju", "Vi", "Sa", "Do"]
-    ])
-
-    now = datetime.now(ARGENTINA_TZ)
-    for week in cal_module.monthcalendar(year, month):
-        row = []
-        for day in week:
-            if day == 0:
-                row.append(InlineKeyboardButton(" ", callback_data="calIgnore"))
-            else:
-                is_today = (day == now.day and month == now.month and year == now.year)
-                label = f"[{day}]" if is_today else str(day)
-                row.append(InlineKeyboardButton(
-                    label,
-                    callback_data=f"calDay_{task_id}_{year}-{month:02d}-{day:02d}",
-                ))
-        rows.append(row)
-
-    rows.append([InlineKeyboardButton("Sin fecha →", callback_data=f"calDay_{task_id}_ninguna")])
-    return InlineKeyboardMarkup(rows)
 
 
 # ── Tasks footer ──────────────────────────────────────────────────────────────
 
-def _format_tasks_text(ordered: list[dict], con_botones: bool) -> str:
+def _format_tasks_text(ordered: list[dict]) -> str:
+    """Encabezado corto: la lista en sí son los BOTONES (una tarea = un botón 🗑️),
+    para que no quede un bloque de texto largo arriba del teclado."""
     if not ordered:
         return (
             "No tiene tareas pendientes.\n\n"
             "✏️ Para agregar una, escriba un punto y la tarea. Ej: \".comprar pan\""
         )
-    lines = ["📋 *Tareas pendientes:*"]
-    for i, task in enumerate(ordered, 1):
-        fecha = str(task.get("fecha", "")).strip()
-        if fecha:
-            lines.append(f"{i}. *{_format_fecha(fecha)}* — {task['tarea']}")
-        else:
-            lines.append(f"{i}. {task['tarea']}")
-    if con_botones:
-        lines.append(
-            "\n✏️ *Agregar:* un punto y la tarea → \".comprar pan\"\n"
-            "🗑️ *Borrar:* toque la tarea en los botones de abajo"
-        )
-    else:
-        lines.append(
-            "\n✏️ *Agregar:* un punto y la tarea → \".comprar pan\"\n"
-            "🗑️ *Borrar:* un punto y el número → \".2\""
-        )
-    return "\n".join(lines)
+    n = len(ordered)
+    return (
+        f"📋 *Tareas pendientes* ({n})\n\n"
+        "Toque una tarea para eliminarla 🗑️\n"
+        "✏️ *Agregar:* un punto y la tarea → \".comprar pan\""
+    )
 
 
 def _build_tasks_keyboard(ordered: list[dict], menu: bool = False) -> InlineKeyboardMarkup:
     """Mismo patrón que los listados (_build_list_menu): un botón 🗑️ por tarea que
-    la elimina al tocarlo. El callback lleva el id de Supabase (no la posición),
-    así el botón sigue apuntando a la MISMA tarea aunque la lista se reordene."""
+    la elimina al tocarlo, con sus estrellas de prioridad. El callback lleva el id
+    de Supabase (no la posición), así el botón sigue apuntando a la MISMA tarea
+    aunque la lista se reordene."""
     ctx = "m" if menu else "c"  # para re-renderizar con el teclado del contexto correcto
-    rows = [
-        [InlineKeyboardButton(f"🗑️ {i}. {t.get('tarea', '')}", callback_data=f"tdel_{t['id']}_{ctx}")]
-        for i, t in enumerate(ordered, 1)
-    ]
+    rows = []
+    for i, t in enumerate(ordered, 1):
+        stars = _stars(_task_prioridad(t))
+        label = f"🗑️ {i}. {stars + ' ' if stars else ''}{t.get('tarea', '')}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"tdel_{t['id']}_{ctx}")])
     rows.append([InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help_tareas")])
     if menu:
         rows.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu_main")])
@@ -1543,8 +1512,8 @@ def _build_tasks_keyboard(ordered: list[dict], menu: bool = False) -> InlineKeyb
 
 
 async def build_tasks_view(user: dict, menu: bool = False) -> tuple[str, InlineKeyboardMarkup]:
-    """Lista de tareas + teclado con botones 🗑️ para eliminar cada una.
-    Un solo fetch para que texto y botones muestren exactamente lo mismo."""
+    """Lista de tareas como botones (🗑️ elimina) + encabezado corto.
+    Un solo fetch para que el conteo y los botones muestren exactamente lo mismo."""
     try:
         tasks = await get_pending_tasks(user)
     except Exception as e:
@@ -1553,21 +1522,8 @@ async def build_tasks_view(user: dict, menu: bool = False) -> tuple[str, InlineK
         )
         return ("⚠️ No pude cargar las tareas. Intente de nuevo en un momento.",
                 _build_tasks_keyboard([], menu))
-    ordered = _sort_tasks(tasks, _orden_cercana(user))
-    return _format_tasks_text(ordered, con_botones=True), _build_tasks_keyboard(ordered, menu)
-
-
-async def build_tasks_footer(user: dict) -> str:
-    """Solo el texto de la lista (sin botones) — para cuando la lista acompaña a una
-    acción que ya trae su propio teclado (ej. el calendario de fecha límite)."""
-    try:
-        tasks = await get_pending_tasks(user)
-    except Exception as e:
-        logger.error(
-            f"Error fetching tasks for user {user.get('chat_id')}: {type(e).__name__}: {e}"
-        )
-        return "⚠️ No pude cargar las tareas. Intente de nuevo en un momento."
-    return _format_tasks_text(_sort_tasks(tasks, _orden_cercana(user)), con_botones=False)
+    ordered = _sort_tasks(tasks)
+    return _format_tasks_text(ordered), _build_tasks_keyboard(ordered, menu)
 
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
@@ -1589,8 +1545,8 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
         tasks = await get_pending_tasks(user)
         # Return them numbered in the SAME order the user sees (canonical)
         return [
-            {"n": i, "tarea": t.get("tarea", ""), "fecha": str(t.get("fecha", "")).strip()}
-            for i, t in enumerate(_sort_tasks(tasks, _orden_cercana(user)), 1)
+            {"n": i, "tarea": t.get("tarea", ""), "prioridad": _task_prioridad(t)}
+            for i, t in enumerate(_sort_tasks(tasks), 1)
         ]
     if func_name == "delete_task":
         positions = func_args.get("posiciones") or []
@@ -1604,11 +1560,9 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
                 eliminadas.append(nombre)
         return {"ok": len(eliminadas) > 0, "eliminadas": eliminadas}
     if func_name == "add_task":
-        task_id = await add_task(user, func_args["tarea"])
-        if task_id and func_args.get("fecha"):
-            await update_task_fecha(user, task_id, func_args["fecha"])
+        task_id = await add_task(user, func_args["tarea"], func_args.get("prioridad"))
         return {"ok": task_id is not None, "tarea": func_args["tarea"],
-                "fecha": func_args.get("fecha")}
+                "prioridad": func_args.get("prioridad")}
     if func_name == "update_event":
         # Self-contained: find the event by name/date, then update it (one step)
         query = func_args.get("query", "")
@@ -1638,7 +1592,7 @@ async def _execute_tool(func_name: str, func_args: dict, user: dict):
             user,
             func_args["posicion"],
             nuevo_nombre=func_args.get("nuevo_nombre"),
-            nueva_fecha=func_args.get("nueva_fecha"),
+            nueva_prioridad=func_args.get("nueva_prioridad"),
         )
         return {"ok": ok}
     if func_name == "add_expense":
@@ -1840,30 +1794,29 @@ async def _run_tool_calls(msg, messages: list, user: dict, chat_id: int, seen_ev
 
         if func_name == "add_task":
             tarea = func_args.get("tarea", "")
-            fecha = func_args.get("fecha")
-            task_id = await add_task(user, tarea)
+            prioridad = func_args.get("prioridad")
+            task_id = await add_task(user, tarea, prioridad)
             if not task_id:
                 messages.append({
                     "tool_call_id": tc.id, "role": "tool", "name": func_name,
-                    "content": "No se pudo agregar la tarea (configuración de Google incompleta).",
+                    "content": "No se pudo agregar la tarea.",
                 })
-            elif fecha:
-                await update_task_fecha(user, task_id, fecha)
+            elif prioridad is not None:
                 show_tasks = True
                 messages.append({
                     "tool_call_id": tc.id, "role": "tool", "name": func_name,
-                    "content": json.dumps({"ok": True, "tarea": tarea, "fecha": fecha}, ensure_ascii=False),
+                    "content": json.dumps({"ok": True, "tarea": tarea, "prioridad": prioridad},
+                                          ensure_ascii=False),
                 })
             else:
-                # No due date given → show the calendar so the user can pick one
-                now = datetime.now(ARGENTINA_TZ)
-                pending_keyboard = _build_calendar_keyboard(task_id, now.year, now.month)
+                # Sin prioridad dicha → botones de estrellas para que la elija
+                pending_keyboard = _build_priority_keyboard(task_id)
                 messages.append({
                     "tool_call_id": tc.id, "role": "tool", "name": func_name,
                     "content": (
                         f"Tarea '{tarea}' agregada. Decile al usuario que la agregaste y "
-                        "preguntale para cuándo es la fecha límite (se le está mostrando un "
-                        "calendario para elegirla)."
+                        "preguntale qué prioridad tiene (se le están mostrando botones de "
+                        "estrellas para elegirla)."
                     ),
                 })
         elif func_name == "delete_event":
@@ -2165,11 +2118,15 @@ async def _call_openai(
             "o exprese un pendiente sin hora de calendario (ej. 'comprar pan', 'llamar al médico', "
             "'tengo que ir al banco', 'recordame pagar la luz'), agregalo SIEMPRE con add_task. "
             "NO respondas que lo agregaste sin antes llamar a add_task. "
-            "Si menciona una fecha límite, calculala y pasala en formato YYYY-MM-DD. "
+            "Las tareas NO llevan fecha ni hora: tienen PRIORIDAD de 0 a 5 estrellas. "
+            "Si el usuario dice la prioridad o urgencia ('urgente'≈5, 'con 3 estrellas', "
+            "'sin apuro'≈0), pasala en 'prioridad'; si NO la dice, NO la inventes ni la "
+            "preguntes vos: omitila y el sistema le muestra botones para elegirla. "
+            "Si quiere que le AVISEN en una fecha/hora, eso es un recordatorio (add_reminder). "
             "Si tiene una hora específica (ej. 'a las 10') o es una reunión/cita/turno, "
             "entonces es un EVENTO de calendario (create_event), no una tarea."
             "\n\nREGLA PARA EDITAR/ELIMINAR TAREAS: "
-            "Para renombrar o cambiar la fecha de una tarea usá update_task con su número. "
+            "Para renombrar o cambiar la prioridad de una tarea usá update_task con su número. "
             "Para eliminar una tarea usá delete_task con su número. Los números son los que ve "
             "el usuario; si dudás del número, llamá get_pending_tasks (cada tarea trae su campo 'n'). "
             "Si el usuario pide eliminar varias (ej. 'borrá la 8 y la 14'), llamá delete_task una "
@@ -2418,38 +2375,37 @@ async def _interpret_photo(image_bytes: bytes) -> dict:
     return json.loads(resp.choices[0].message.content or "{}")
 
 
-# ── Calendar callbacks ────────────────────────────────────────────────────────
+# ── Priority callback (botones de estrellas al agregar una tarea) ────────────
 
-async def handle_cal_nav(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_task_priority(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
-    if query.data == "calIgnore":
-        return
-    _, task_id, year, month = query.data.split("_", 3)
-    await query.edit_message_reply_markup(
-        reply_markup=_build_calendar_keyboard(task_id, int(year), int(month))
-    )
-
-
-async def handle_cal_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
     chat_id = update.effective_chat.id
     user = await get_user(chat_id)
     if not user:
+        await query.answer()
         return
 
-    _, task_id, fecha_val = query.data.split("_", 2)
+    _, task_id, n = query.data.split("_", 2)  # tprio_{id}_{0-5}
+    prioridad = int(n)
 
-    if fecha_val != "ninguna":
-        await update_task_fecha(user, task_id, fecha_val)
-        header = f"✅ Fecha límite: *{_format_fecha(fecha_val)}*\n\n"
+    nombre = await set_task_priority(user, int(task_id), prioridad)
+    if nombre:
+        await query.answer()
+        stars = _stars(prioridad)
+        header = f"✅ {stars + ' ' if stars else ''}*{nombre}*" + \
+                 ("" if stars else " (sin estrellas)") + "\n\n"
     else:
-        header = "✅ Sin fecha límite\n\n"
+        await query.answer("⚠️ No pude guardar la prioridad.")
+        header = ""
 
     text, kb = await build_tasks_view(user)
-    await query.edit_message_text(header + text, parse_mode="Markdown", reply_markup=kb)
+    try:
+        await query.edit_message_text(header + text, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        try:
+            await query.edit_message_text(header + text, reply_markup=kb)
+        except Exception:
+            pass
 
 
 # ── Menú interactivo ──────────────────────────────────────────────────────────
@@ -2523,10 +2479,6 @@ def _tratamiento_label(user: dict) -> str:
     return t if t else "Neutro"
 
 
-def _orden_label(user: dict) -> str:
-    return "primero las cercanas" if _orden_cercana(user) else "primero las lejanas"
-
-
 def _rows_to_csv(rows: list[dict]) -> bytes:
     """Convierte filas (dicts) a CSV. Saca columnas internas (id/chat_id). BOM para Excel."""
     cols = [k for k in rows[0].keys() if k not in ("id", "chat_id")]
@@ -2558,7 +2510,6 @@ def _format_config(user: dict) -> str:
         "⚙️ *Configuración*\n\n"
         f"👤 Te llamo: *{_tratamiento_label(user)}*\n"
         f"🌅 Resumen diario: *{_resumen_label(user)}*\n"
-        f"🔀 Orden de tareas: *{_orden_label(user)}*\n"
         f"🔑 Suscripción: *{estado_label}*{venc_line}\n"
         f"🔗 Cuenta de Google: *{google}*"
     )
@@ -2568,7 +2519,6 @@ def _build_config_menu(user: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"👤 Cómo te llamo: {_tratamiento_label(user)}", callback_data="menu_tratamiento")],
         [InlineKeyboardButton(f"🌅 Resumen diario: {_resumen_label(user)}", callback_data="menu_resumen")],
-        [InlineKeyboardButton(f"🔀 Orden de tareas: {_orden_label(user)}", callback_data="menu_orden")],
         [InlineKeyboardButton("🔗 Reconectar Google", callback_data="menu_reconnect")],
         [InlineKeyboardButton("📤 Exportar mis datos", callback_data="menu_export")],
         [InlineKeyboardButton("🗑️ Borrar mis datos", callback_data="menu_delete")],
@@ -3092,25 +3042,6 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    if data == "menu_orden":
-        nuevo = "lejana" if _orden_cercana(user) else "cercana"
-        ok = await update_user_orden(chat_id, nuevo)
-        if ok:
-            user = await get_user(chat_id)
-        try:
-            await query.edit_message_text(
-                _format_config(user), parse_mode="Markdown",
-                reply_markup=_build_config_menu(user),
-            )
-        except Exception:
-            pass  # "Message is not modified" u otro edit inofensivo
-        if not ok:
-            await query.message.reply_text(
-                "⚠️ No pude guardar el orden. Falta crear la columna `orden_tareas` "
-                "en la base de datos.", parse_mode="Markdown",
-            )
-        return
-
     if data == "menu_resumen":
         await query.edit_message_text(
             "🌅 *Resumen diario*\n\n¿A qué hora quiere recibir el resumen del día "
@@ -3387,18 +3318,13 @@ async def _route_text(
         elif content:
             task_id = await add_task(user, content)
             if task_id:
-                now = datetime.now(ARGENTINA_TZ)
-                keyboard = _build_calendar_keyboard(task_id, now.year, now.month)
                 await message.reply_text(
-                    f"✅ Tarea agregada: *{content}*\n\n¿Fecha límite?",
+                    f"✅ Tarea agregada: *{content}*\n\n¿Qué prioridad tiene?",
                     parse_mode="Markdown",
-                    reply_markup=keyboard,
+                    reply_markup=_build_priority_keyboard(task_id),
                 )
             else:
-                await message.reply_text(
-                    "⚠️ No se pudo agregar la tarea. "
-                    "Complete primero la configuración de Google."
-                )
+                await message.reply_text("⚠️ No se pudo agregar la tarea. Intente de nuevo.")
         else:
             text_t, kb = await build_tasks_view(user)
             await message.reply_text(
@@ -3456,16 +3382,14 @@ async def _route_text(
         logger.error(f"OpenAI error for user {user['chat_id']}: {e}")
         reply, keyboard = "⚠️ Tuve un error procesando su mensaje. Intente de nuevo.", None
 
-    # The tasks list is only appended when the list actually changed. If the
-    # action didn't attach its own keyboard, the list rides with its 🗑️ buttons;
-    # if it did (ej. el calendario de fecha), va solo el texto para no pisarlo.
+    # The tasks list is only appended when the list actually changed. La lista SON
+    # los botones 🗑️, así que solo puede viajar si la acción no trajo su propio
+    # teclado (ej. los botones de prioridad de una tarea recién agregada).
     if show_tasks and keyboard is None:
         text_t, kb = await build_tasks_view(user)
         full_text, reply_kb = reply + "\n\n" + text_t, kb
     else:
-        footer = await build_tasks_footer(user) if show_tasks else None
-        full_text = reply + ("\n\n" + footer if footer else "")
-        reply_kb = keyboard
+        full_text, reply_kb = reply, keyboard
     # _reply_long parte mensajes largos (>4096) y cae a texto plano si el Markdown falla.
     await _reply_long(message, full_text, reply_markup=reply_kb)
 
@@ -3696,9 +3620,9 @@ async def _photo_tareas(message, user: dict, data: dict) -> None:
         tarea = str(it.get("tarea", "")).strip()
         if not tarea:
             continue
+        # Varias tareas de una foto: entran sin estrellas (la prioridad se puede
+        # cambiar después: "ponele 3 estrellas a la tarea 2").
         task_id = await add_task(user, tarea)
-        if task_id and it.get("fecha"):
-            await update_task_fecha(user, task_id, it["fecha"])
         if task_id:
             added.append(tarea)
     if not added:
@@ -3977,10 +3901,9 @@ def main() -> None:
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(MessageHandler(filters.TEXT | filters.VOICE | filters.PHOTO, handle_message))
-    app.add_handler(CallbackQueryHandler(handle_cal_nav, pattern=r"^calNav_|^calIgnore$"))
-    app.add_handler(CallbackQueryHandler(handle_cal_day, pattern=r"^calDay_"))
     app.add_handler(CallbackQueryHandler(handle_delete_event, pattern=r"^delEvent"))
     app.add_handler(CallbackQueryHandler(handle_task_delete, pattern=r"^tdel_"))
+    app.add_handler(CallbackQueryHandler(handle_task_priority, pattern=r"^tprio_"))
     app.add_handler(CallbackQueryHandler(handle_create_conflict, pattern=r"^createConflict_"))
     app.add_handler(CallbackQueryHandler(handle_pago_medio, pattern=r"^payexp_"))
     app.add_handler(CallbackQueryHandler(handle_cuotas_count, pattern=r"^cuotacnt_"))

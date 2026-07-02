@@ -4,6 +4,35 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **Tareas v2: sin choclazo (la lista SON los botones) + prioridad con estrellas en vez
+  de fecha límite.** (bot.py, data_store.py, database.py, scheduler.py, texts.py, schema.sql)
+  ⚠️ **REQUIERE SQL EN SUPABASE** (schema.sql al final):
+  `ALTER TABLE public.tareas ADD COLUMN IF NOT EXISTS prioridad INT NOT NULL DEFAULT 0;`
+  + `NOTIFY pgrst, 'reload schema';` — hasta correrlo, elegir/pasar prioridad falla
+  (ver la lista y borrar siguen andando).
+  - **Sin choclazo:** el texto de la lista se fue; queda un encabezado corto con el
+    conteo y cada tarea es su botón `🗑️ n. ⭐⭐⭐ tarea`. Orden: más estrellas arriba,
+    a igual prioridad la más vieja primero (bot._sort_tasks == data_store._sort_pending,
+    clave para que ".2" y delete_task borren lo que se ve).
+  - **Prioridad 0-5 estrellas reemplaza a la fecha límite:** al agregar una tarea
+    (".tarea" o lenguaje natural sin prioridad dicha) se muestran 6 botones
+    (⭐…⭐⭐⭐⭐⭐ y "Sin estrellas", callback `tprio_{id}_{n}`) en lugar del calendario.
+    Si el usuario la dice ("urgente", "5 estrellas"), add_task la recibe en `prioridad`
+    y no se pregunta. update_task cambió `nueva_fecha` → `nueva_prioridad`.
+    get_pending_tasks (tool) devuelve {n, tarea, prioridad}.
+  - **Eliminado:** calendario de fecha límite (handle_cal_nav/day, _build_calendar_keyboard,
+    update_task_fecha), config "Orden de tareas" (menu_orden, update_user_orden,
+    orden_tareas ya no se usa — la columna puede quedar en la DB), y el footer de texto
+    de tareas (build_tasks_footer): si una acción trae su propio teclado, la lista ya no
+    viaja (la lista son botones).
+  - Resumen diario (scheduler) ahora ordena igual que el bot y muestra las estrellas.
+    Manuales de texts.py actualizados.
+  - Verificado: mocks locales 7/7 (orden, labels, tprio, tdel, tool, vacío) y experimento
+    REAL contra gpt-4.1 8/8 (exp_prioridad_modelo.py): sin mención → add_task SIN
+    prioridad; "urgente/5 estrellas" → prioridad=5; "tarea para el viernes" → sigue
+    siendo add_task (no evento); "ponele 3 estrellas a la tarea 2" →
+    update_task(2, nueva_prioridad=3).
+
 - **bot.py + data_store.py — Tareas con botones 🗑️ para eliminar (mismo patrón que los
   listados).**
   Antes borrar tareas era solo con ".2" o por lenguaje natural; ahora TODA lista de

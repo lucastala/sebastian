@@ -15,6 +15,8 @@ from database import (
 )
 from google_services import get_today_events
 from data_store import (
+    _prioridad,
+    _sort_pending,
     get_balance,
     get_expenses,
     get_pending_tasks,
@@ -78,8 +80,10 @@ async def send_daily_summary(bot: Bot) -> None:
 
             if tasks:
                 task_lines = ["📋 Tareas pendientes:"]
-                for i, t in enumerate(tasks, 1):
-                    task_lines.append(f"{i}. {t['tarea']}")
+                # Mismo orden y numeración que ve en el bot (prioridad desc)
+                for i, t in enumerate(_sort_pending(tasks), 1):
+                    stars = "⭐" * _prioridad(t)
+                    task_lines.append(f"{i}. {stars + ' ' if stars else ''}{t['tarea']}")
                 tasks_block = "\n".join(task_lines)
             else:
                 tasks_block = "No tiene tareas pendientes."

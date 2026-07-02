@@ -36,19 +36,17 @@ def _today() -> str:
 
 # ── Tareas ────────────────────────────────────────────────────────────────────
 
-def _es_cercana(user: dict) -> bool:
-    return str(user.get("orden_tareas") or "").lower() == "cercana"
+def _prioridad(row: dict) -> int:
+    try:
+        return max(0, min(5, int(row.get("prioridad") or 0)))
+    except (ValueError, TypeError):
+        return 0
 
 
-def _sort_pending(rows: list[dict], cercana: bool = False) -> list[dict]:
-    """Igual que el display (bot._sort_tasks). cercana=False: sin fecha arriba, luego
-    lejana→cercana. cercana=True: cercana→lejana arriba, sin fecha al final."""
-    no_date = [r for r in rows if not str(r.get("fecha") or "").strip()]
-    dated = sorted(
-        [r for r in rows if str(r.get("fecha") or "").strip()],
-        key=lambda r: str(r["fecha"]), reverse=not cercana,
-    )
-    return (dated + no_date) if cercana else (no_date + dated)
+def _sort_pending(rows: list[dict]) -> list[dict]:
+    """Igual que el display (bot._sort_tasks): más estrellas arriba; a igual
+    prioridad, la más vieja primero (id ascendente)."""
+    return sorted(rows, key=lambda r: (-_prioridad(r), int(r.get("id") or 0)))
 
 
 async def get_pending_tasks(user: dict) -> list[dict]:
@@ -58,26 +56,34 @@ async def get_pending_tasks(user: dict) -> list[dict]:
     return res.data or []
 
 
-async def add_task(user: dict, tarea: str) -> str | None:
+async def add_task(user: dict, tarea: str, prioridad: int | None = None) -> str | None:
     try:
-        res = get_supabase().table("tareas").insert({
-            "chat_id": user["chat_id"], "tarea": tarea, "estado": "pendiente", "fecha": "",
-        }).execute()
+        row = {"chat_id": user["chat_id"], "tarea": tarea, "estado": "pendiente", "fecha": ""}
+        if prioridad is not None:
+            row["prioridad"] = max(0, min(5, int(prioridad)))
+        res = get_supabase().table("tareas").insert(row).execute()
         return str(res.data[0]["id"]) if res.data else None
     except Exception as e:
         logger.error(f"Error adding task for {user.get('chat_id')}: {e}")
         return None
 
 
-async def update_task_fecha(user: dict, task_id: str, fecha: str) -> bool:
+async def set_task_priority(user: dict, task_id: int, prioridad: int) -> str | None:
+    """Setea la prioridad (0-5 estrellas) de una tarea por id. Devuelve el nombre,
+    o None si la tarea ya no está pendiente o falló el update."""
     try:
-        get_supabase().table("tareas").update({"fecha": fecha}).eq(
-            "id", int(task_id)
-        ).eq("chat_id", user["chat_id"]).execute()
-        return True
+        res = get_supabase().table("tareas").select("*").eq("id", task_id).eq(
+            "chat_id", user["chat_id"]
+        ).eq("estado", "pendiente").execute()
+        if not res.data:
+            return None
+        get_supabase().table("tareas").update(
+            {"prioridad": max(0, min(5, int(prioridad)))}
+        ).eq("id", task_id).execute()
+        return res.data[0].get("tarea", "")
     except Exception as e:
-        logger.error(f"Error updating task fecha: {e}")
-        return False
+        logger.error(f"Error setting task priority for {user.get('chat_id')}: {e}")
+        return None
 
 
 async def delete_task_by_id(user: dict, task_id: int) -> str | None:
@@ -96,7 +102,7 @@ async def delete_task_by_id(user: dict, task_id: int) -> str | None:
 
 
 async def delete_task_by_position(user: dict, position: int) -> str | None:
-    rows = _sort_pending(await get_pending_tasks(user), _es_cercana(user))
+    rows = _sort_pending(await get_pending_tasks(user))
     if position < 1 or position > len(rows):
         return None
     row = rows[position - 1]
@@ -107,16 +113,16 @@ async def delete_task_by_position(user: dict, position: int) -> str | None:
 
 
 async def update_task(user: dict, posicion: int, nuevo_nombre: str | None = None,
-                      nueva_fecha: str | None = None) -> bool:
-    rows = _sort_pending(await get_pending_tasks(user), _es_cercana(user))
+                      nueva_prioridad: int | None = None) -> bool:
+    rows = _sort_pending(await get_pending_tasks(user))
     if posicion < 1 or posicion > len(rows):
         return False
     row = rows[posicion - 1]
     update = {}
     if nuevo_nombre:
         update["tarea"] = nuevo_nombre
-    if nueva_fecha is not None:
-        update["fecha"] = nueva_fecha
+    if nueva_prioridad is not None:
+        update["prioridad"] = max(0, min(5, int(nueva_prioridad)))
     if update:
         get_supabase().table("tareas").update(update).eq("id", row["id"]).execute()
     return True
