@@ -4,6 +4,13 @@ Registro de cambios para no pisar trabajo previo. Lo más nuevo arriba.
 
 ## 2026-07-01
 
+- **bot.py — Botones de tareas alineados: tarea a la IZQUIERDA, estrellas a la DERECHA.**
+  Telegram centra siempre el texto de los botones (la API no tiene alineación); el truco
+  es rellenar con braille blank U+2800 (blanco que los clientes no recortan):
+  `🗑️ 1. tarea⠀⠀⠀⠀⭐⭐⭐`. `_task_btn_label` + `_TASK_BTN_WIDTH = 35` (ancho
+  aproximado: emoji/estrella rinden ~2 chars). Si en el teléfono se ve cortado con "…"
+  o descentrado, ajustar esa constante.
+
 - **Tareas v2: sin choclazo (la lista SON los botones) + prioridad con estrellas en vez
   de fecha límite.** (bot.py, data_store.py, database.py, scheduler.py, texts.py, schema.sql)
   ⚠️ **REQUIERE SQL EN SUPABASE** (schema.sql al final):

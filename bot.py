@@ -1494,6 +1494,23 @@ def _format_tasks_text(ordered: list[dict]) -> str:
     )
 
 
+# Telegram centra SIEMPRE el texto de los botones (la API no tiene alineación).
+# Truco: rellenar con braille blank (U+2800, un blanco que los clientes NO recortan)
+# para que la tarea quede pegada a la IZQUIERDA y las estrellas pegadas a la DERECHA:
+# "🗑️ 1. tarea⠀⠀⠀⠀⠀⠀⭐⭐⭐". El ancho es aproximado (emoji y estrellas ocupan ~2
+# caracteres): si en el teléfono se ve cortado con "…" o descentrado, ajustar acá.
+_TASK_BTN_WIDTH = 35
+
+
+def _task_btn_label(i: int, tarea: str, stars: str) -> str:
+    left = f"🗑️ {i}. {tarea}"
+    if not stars:
+        return left + "⠀" * max(0, _TASK_BTN_WIDTH - len(left))
+    # las estrellas rinden ~2 chars de ancho cada una
+    pad = max(1, _TASK_BTN_WIDTH - len(left) - 2 * len(stars))
+    return left + "⠀" * pad + stars
+
+
 def _build_tasks_keyboard(ordered: list[dict], menu: bool = False) -> InlineKeyboardMarkup:
     """Mismo patrón que los listados (_build_list_menu): un botón 🗑️ por tarea que
     la elimina al tocarlo, con sus estrellas de prioridad. El callback lleva el id
@@ -1503,7 +1520,7 @@ def _build_tasks_keyboard(ordered: list[dict], menu: bool = False) -> InlineKeyb
     rows = []
     for i, t in enumerate(ordered, 1):
         stars = _stars(_task_prioridad(t))
-        label = f"🗑️ {i}. {stars + ' ' if stars else ''}{t.get('tarea', '')}"
+        label = _task_btn_label(i, t.get("tarea", ""), stars)
         rows.append([InlineKeyboardButton(label, callback_data=f"tdel_{t['id']}_{ctx}")])
     rows.append([InlineKeyboardButton("📖 Manual de uso", callback_data="menu_help_tareas")])
     if menu:
